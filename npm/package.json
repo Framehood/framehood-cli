@@ -1,0 +1,26 @@
+{
+  "name": "framehood",
+  "version": "0.1.0",
+  "description": "Framehood CLI — generate images, video and audio from your terminal.",
+  "bin": {
+    "framehood": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "UNLICENSED",
+  "homepage": "https://framehood.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Framehood/framehood-cli.git"
+  },
+  "keywords": ["framehood", "mcp", "image", "video", "audio", "cli", "generation"]
+}

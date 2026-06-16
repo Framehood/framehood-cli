@@ -1,0 +1,6 @@
+# Built binary
+/framehood
+/dist/
+
+# npm wrapper: downloaded binary
+npm/bin/

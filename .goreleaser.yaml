@@ -1,0 +1,56 @@
+# GoReleaser v2 — builds cross-platform binaries, a GitHub Release, and updates
+# the Homebrew tap on every pushed `v*` tag. Run in CI (see .github/workflows).
+version: 2
+
+project_name: framehood
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: framehood
+    main: .
+    binary: framehood
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X github.com/Framehood/framehood-cli/internal/cmd.Version={{ .Version }}
+
+archives:
+  - id: default
+    # Matches the names the npm wrapper and Homebrew formula expect.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: framehood
+    repository:
+      owner: Framehood
+      name: homebrew-tap
+      # CI provides HOMEBREW_TAP_TOKEN (a PAT with `contents:write` on the tap).
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://framehood.ai"
+    description: "Framehood CLI — generate images, video and audio from your terminal."
+    license: "Proprietary"
+    install: |
+      bin.install "framehood"
+    test: |
+      system "#{bin}/framehood", "--version"
+
+release:
+  github:
+    owner: Framehood
+    name: framehood-cli
+  draft: false
