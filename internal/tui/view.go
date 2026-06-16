@@ -11,13 +11,18 @@ import (
 func (m model) View() string {
 	var b strings.Builder
 
-	// Header: title + account + balance.
+	// Header: title + account + balance (or a signed-out hint).
 	title := styTitle.Render("✦ Framehood")
-	acct := m.email
-	if acct == "" {
-		acct = "signed in"
+	var right string
+	if !m.loggedIn {
+		right = styRed.Render("not signed in")
+	} else {
+		acct := m.email
+		if acct == "" {
+			acct = "signed in"
+		}
+		right = styMuted.Render(fmt.Sprintf("%s · %s", acct, m.balance))
 	}
-	right := styMuted.Render(fmt.Sprintf("%s · %s", acct, m.balance))
 	b.WriteString(headerRow(title, right, m.width))
 	b.WriteString("\n\n")
 
