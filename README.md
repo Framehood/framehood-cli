@@ -30,6 +30,9 @@ npm install -g framehood
 go install github.com/Framehood/framehood-cli@latest
 ```
 
+This installs the binary as `framehood-cli` (Go names it after the module). For
+the `framehood` command, prefer Homebrew or npm above, or `mv` it after install.
+
 ### Prebuilt binaries
 
 Download for your platform from the [latest release](https://github.com/Framehood/framehood-cli/releases/latest),
