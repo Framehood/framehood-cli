@@ -4,12 +4,32 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Gate optional publishers on whether their secrets are configured. (Secrets
+  # cannot be referenced directly in a job-level `if:`, so surface them as job
+  # outputs here.)
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      has_brew: ${{ steps.c.outputs.has_brew }}
+      has_npm: ${{ steps.c.outputs.has_npm }}
+    steps:
+      - id: c
+        env:
+          BREW: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          NPM: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "has_brew=$([ -n "$BREW" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "has_npm=$([ -n "$NPM" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   goreleaser:
+    needs: check
+    if: needs.check.outputs.has_brew == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,13 +45,13 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PAT with contents:write on Framehood/homebrew-tap (Settings → Secrets).
+          # PAT with contents:write on Framehood/homebrew-tap.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   npm:
+    needs: [check, goreleaser]
+    if: needs.check.outputs.has_npm == 'true'
     runs-on: ubuntu-latest
-    needs: goreleaser
-    if: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -41,7 +61,6 @@ jobs:
       - name: Publish npm wrapper
         working-directory: npm
         run: |
-          # Align the wrapper version to the tag (strip leading v).
           npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
           npm publish --access public
         env:
