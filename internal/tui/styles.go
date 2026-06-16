@@ -2,41 +2,55 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Framehood palette — warm amber accent on a near-black canvas.
+// Framehood brand palette — indigo accent (matches the logo) on a terminal that
+// is usually dark. AdaptiveColor keeps text legible on light terminals too.
 var (
-	colAccent = lipgloss.Color("#E8A33D") // amber
-	colText   = lipgloss.Color("#E8E8E8")
-	colMuted  = lipgloss.Color("#7A7A7A")
-	colGreen  = lipgloss.Color("#5FB87A")
-	colRed    = lipgloss.Color("#E5616B")
-	colBorder = lipgloss.Color("#333333")
+	colAccent  = lipgloss.Color("#6c6ff2") // brand indigo (a touch brighter for terminals)
+	colAccent2 = lipgloss.Color("#9aa0ff") // lighter indigo for keys/highlights
+	colText    = lipgloss.AdaptiveColor{Light: "#1a1a22", Dark: "#e9e9ef"}
+	colMuted   = lipgloss.Color("#8b8b97")
+	colDim     = lipgloss.Color("#5b5b66")
+	colGreen   = lipgloss.Color("#4cc38a")
+	colRed     = lipgloss.Color("#f0697e")
+	colBorder  = lipgloss.Color("#34343f")
+	colInk     = lipgloss.Color("#0b0b10") // text on the accent fill
 
 	styTitle = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
-	styMuted = lipgloss.NewStyle().Foreground(colMuted)
+	styAcc   = lipgloss.NewStyle().Foreground(colAccent)
 	styText  = lipgloss.NewStyle().Foreground(colText)
+	styMuted = lipgloss.NewStyle().Foreground(colMuted)
+	styDim   = lipgloss.NewStyle().Foreground(colDim)
 	styGreen = lipgloss.NewStyle().Foreground(colGreen)
 	styRed   = lipgloss.NewStyle().Foreground(colRed)
+	styKey   = lipgloss.NewStyle().Foreground(colAccent2)
 
+	// Small section label (eyebrow).
+	styEyebrow = lipgloss.NewStyle().Foreground(colDim).Bold(true)
+
+	// Bordered content panel.
 	styPanel = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colBorder).
 			Padding(0, 1)
 
+	// Focused panel (e.g. the composer while typing).
+	styPanelActive = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colAccent).
+			Padding(0, 1)
+
+	// Type-selector chips.
 	styChip = lipgloss.NewStyle().
 		Padding(0, 2).
 		MarginRight(1).
-		Foreground(colMuted).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colBorder)
+		Foreground(colMuted)
 
 	styChipActive = lipgloss.NewStyle().
 			Padding(0, 2).
 			MarginRight(1).
-			Foreground(lipgloss.Color("#1A1A1A")).
+			Foreground(colInk).
 			Background(colAccent).
-			Bold(true).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colAccent)
+			Bold(true)
 
-	styHelp = lipgloss.NewStyle().Foreground(colMuted)
+	styHelp = lipgloss.NewStyle().Foreground(colDim)
 )
