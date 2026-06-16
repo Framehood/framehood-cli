@@ -98,3 +98,7 @@ framehood
 ## Docs
 
 Full documentation: <https://docs.framehood.ai>
+
+## License
+
+Framehood is a proprietary, source-available product. See [LICENSE](LICENSE).

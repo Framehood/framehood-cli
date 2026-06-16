@@ -1,17 +1,24 @@
+Framehood Source-Available License
+
 Copyright © 2026 Framehood. All rights reserved.
 
-This software is the official command-line client for the Framehood service
-(https://framehood.ai). You are granted permission to download, install, and
-use the compiled binaries to access the Framehood service.
+Framehood is a proprietary product. This source code is published publicly for
+transparency and reference — it is "source-available", not open source.
 
-The source code is published for transparency. Redistribution of the source
-code or modified versions, in whole or in part, is not permitted without prior
-written permission from Framehood.
+You are granted a non-exclusive, non-transferable, revocable license to
+download, install, and run the official builds of this software solely to
+access and use the Framehood service (https://framehood.ai), subject to the
+Framehood Terms of Service.
+
+Without prior written permission from Framehood, you may NOT:
+  - redistribute the source code or compiled binaries, in whole or in part;
+  - modify the software and distribute the modified version;
+  - create derivative works or competing products from it;
+  - remove or alter this notice or the copyright notices in the software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
