@@ -68,13 +68,23 @@ func newWhoamiCmd(cfg config.Config) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			bal, balErr := sess.Client().Balance(cmd.Context())
 			who := sess.Email()
+			if who == "" && balErr == nil {
+				// The login flow doesn't always capture the email; billing(balance)
+				// returns it, so fall back to that.
+				var b struct {
+					Email string `json:"email"`
+				}
+				if json.Unmarshal(bal, &b) == nil && b.Email != "" {
+					who = b.Email
+				}
+			}
 			if who == "" {
 				who = "(unknown email)"
 			}
 			fmt.Printf("Signed in as %s\n", who)
-			bal, err := sess.Client().Balance(cmd.Context())
-			if err == nil {
+			if balErr == nil {
 				fmt.Printf("Balance: %s\n", prettyInline(bal))
 			}
 			return nil
@@ -196,12 +206,23 @@ func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice s
 	case "video":
 		tool = "video"
 		if action == "" {
-			action = "scene"
+			// Plain text->video needs no actor (create); only route to the
+			// actor scene composite when an actor is given.
+			if actorID != "" {
+				action = "scene"
+			} else {
+				action = "create"
+			}
 		}
 		args["action"] = action
-		args["scene_prompt"] = prompt
 		args["prompt"] = prompt
+		if action == "scene" {
+			args["scene_prompt"] = prompt
+		}
 		args["out"] = defaultOut(out, "video.mp4")
+		if format != "" {
+			args["format"] = format
+		}
 	default:
 		return "", nil, fmt.Errorf("unknown --type %q (want image, video or audio)", kind)
 	}
