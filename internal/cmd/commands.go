@@ -68,13 +68,23 @@ func newWhoamiCmd(cfg config.Config) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			bal, balErr := sess.Client().Balance(cmd.Context())
 			who := sess.Email()
+			if who == "" && balErr == nil {
+				// The login flow doesn't always capture the email; billing(balance)
+				// returns it, so fall back to that.
+				var b struct {
+					Email string `json:"email"`
+				}
+				if json.Unmarshal(bal, &b) == nil && b.Email != "" {
+					who = b.Email
+				}
+			}
 			if who == "" {
 				who = "(unknown email)"
 			}
 			fmt.Printf("Signed in as %s\n", who)
-			bal, err := sess.Client().Balance(cmd.Context())
-			if err == nil {
+			if balErr == nil {
 				fmt.Printf("Balance: %s\n", prettyInline(bal))
 			}
 			return nil
