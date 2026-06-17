@@ -206,12 +206,26 @@ func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice s
 	case "video":
 		tool = "video"
 		if action == "" {
-			action = "scene"
+			// Plain text->video needs no actor (create); only route to the
+			// actor scene composite when an actor is given.
+			if actorID != "" {
+				action = "scene"
+			} else {
+				action = "create"
+			}
+		}
+		if action == "scene" && actorID == "" {
+			return "", nil, fmt.Errorf("--actor is required for --type video --action scene")
 		}
 		args["action"] = action
-		args["scene_prompt"] = prompt
 		args["prompt"] = prompt
+		if action == "scene" {
+			args["scene_prompt"] = prompt
+		}
 		args["out"] = defaultOut(out, "video.mp4")
+		if format != "" {
+			args["format"] = format
+		}
 	default:
 		return "", nil, fmt.Errorf("unknown --type %q (want image, video or audio)", kind)
 	}
