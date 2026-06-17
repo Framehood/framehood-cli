@@ -30,6 +30,19 @@ const (
 	phaseError
 )
 
+// focusZone is the pane currently receiving keys. This is the fix for the old
+// always-focused-input model: keys are routed by zone, so text editing, tab
+// switching, and result actions never collide.
+type focusZone int
+
+const (
+	zoneTabs   focusZone = iota // image/video/audio selector — h/l or ←/→ switches
+	zoneInput                   // the prompt field — text editing happens ONLY here
+	zoneOutput                  // the result/history — o/c act here (input is blurred)
+)
+
+const numZones = 3
+
 type historyItem struct {
 	kind   string
 	prompt string
@@ -42,19 +55,20 @@ type model struct {
 	email    string
 	loggedIn bool
 
-	input    textinput.Model
-	spin     spinner.Model
-	kindIdx  int
-	phase    phase
-	status   string
-	balance  string
-	result   string
-	errMsg   string
-	jobID    string
-	started  time.Time
-	history  []historyItem
-	width    int
-	height   int
+	input   textinput.Model
+	spin    spinner.Model
+	focus   focusZone
+	kindIdx int
+	phase   phase
+	status  string
+	balance string
+	result  string
+	errMsg  string
+	jobID   string
+	started time.Time
+	history []historyItem
+	width   int
+	height  int
 }
 
 // Run starts the interactive studio.
@@ -75,6 +89,7 @@ func Run(client *mcp.Client, email string) error {
 		loggedIn: client != nil,
 		input:    ti,
 		spin:     sp,
+		focus:    zoneInput, // start ready to type
 		balance:  "…",
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
@@ -101,6 +116,22 @@ type polledMsg struct {
 }
 type pollTickMsg struct{ jobID string }
 
+// setFocus moves focus to z, keeping the textinput's Focus/Blur in sync so the
+// raw key stream only reaches the input when the input zone is active.
+func (m model) setFocus(z focusZone) model {
+	m.focus = z
+	if z == zoneInput {
+		m.input.Focus()
+	} else {
+		m.input.Blur()
+	}
+	return m
+}
+
+func (m model) cycleFocus(dir int) model {
+	return m.setFocus(focusZone((int(m.focus) + dir + numZones) % numZones))
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -108,44 +139,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - 6
 
 	case tea.KeyMsg:
+		// Global keys (any zone).
 		switch msg.String() {
-		case "ctrl+c", "esc":
+		case "ctrl+c":
 			return m, tea.Quit
-		case "q":
-			if m.phase != phaseIdle || m.input.Value() == "" {
-				return m, tea.Quit
-			}
-		case "tab", "right":
-			if m.phase != phaseWorking {
-				m.kindIdx = (m.kindIdx + 1) % len(kinds)
-			}
-		case "shift+tab", "left":
-			if m.phase != phaseWorking {
-				m.kindIdx = (m.kindIdx - 1 + len(kinds)) % len(kinds)
-			}
-		case "o":
-			if m.phase == phaseDone && m.result != "" && !m.input.Focused() {
-				_ = openBrowser(m.result)
-				return m, nil
-			}
-		case "enter":
-			if m.phase == phaseWorking {
-				return m, nil
-			}
-			if !m.loggedIn {
-				m.phase = phaseError
-				m.errMsg = "You're not signed in. Quit and run `framehood login` first."
-				return m, nil
-			}
-			prompt := strings.TrimSpace(m.input.Value())
-			if prompt == "" {
-				return m, nil
-			}
-			m.phase = phaseWorking
-			m.status = "submitting"
-			m.result, m.errMsg, m.jobID = "", "", ""
-			m.started = time.Now()
-			return m, tea.Batch(m.spin.Tick, submitCmd(m.client, kinds[m.kindIdx], prompt))
+		case "tab":
+			return m.cycleFocus(1), nil
+		case "shift+tab":
+			return m.cycleFocus(-1), nil
+		}
+		// Zone-routed keys.
+		switch m.focus {
+		case zoneTabs:
+			return m.updateTabs(msg)
+		case zoneOutput:
+			return m.updateOutput(msg)
+		default: // zoneInput
+			return m.updateInput(msg)
 		}
 
 	case balanceMsg:
@@ -156,7 +166,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.phase = phaseError
 			m.errMsg = msg.err.Error()
-			return m, nil
+			return m.setFocus(zoneOutput), nil
 		}
 		return m.handleJob(msg.job)
 
@@ -164,7 +174,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.phase = phaseError
 			m.errMsg = msg.err.Error()
-			return m, nil
+			return m.setFocus(zoneOutput), nil
 		}
 		return m.handleJob(msg.job)
 
@@ -177,6 +187,81 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Non-key messages while editing still feed the input (e.g. paste).
+	if m.focus == zoneInput && m.phase != phaseWorking {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+// updateTabs: the image/video/audio selector is focused.
+func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	case "left", "h":
+		if m.phase != phaseWorking {
+			m.kindIdx = (m.kindIdx - 1 + len(kinds)) % len(kinds)
+		}
+	case "right", "l":
+		if m.phase != phaseWorking {
+			m.kindIdx = (m.kindIdx + 1) % len(kinds)
+		}
+	case "enter":
+		return m.setFocus(zoneInput), nil // jump straight to typing
+	}
+	return m, nil
+}
+
+// updateOutput: the result/history is focused — action keys live here, and the
+// input is blurred, so 'o' finally opens the browser instead of typing "o".
+func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	case "o":
+		if m.phase == phaseDone && m.result != "" {
+			_ = openBrowser(m.result)
+		}
+	case "enter":
+		// Start a fresh prompt.
+		if m.phase != phaseWorking {
+			m.phase = phaseIdle
+			m.result, m.errMsg, m.jobID = "", "", ""
+			m.input.SetValue("")
+			return m.setFocus(zoneInput), nil
+		}
+	}
+	return m, nil
+}
+
+// updateInput: the prompt field is focused — text editing happens here, and the
+// only control keys are esc (leave) and enter (submit).
+func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		return m.setFocus(zoneTabs), nil
+	case "enter":
+		if m.phase == phaseWorking {
+			return m, nil
+		}
+		if !m.loggedIn {
+			m.phase = phaseError
+			m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+			return m.setFocus(zoneOutput), nil
+		}
+		prompt := strings.TrimSpace(m.input.Value())
+		if prompt == "" {
+			return m, nil
+		}
+		m.phase = phaseWorking
+		m.status = "submitting"
+		m.result, m.errMsg, m.jobID = "", "", ""
+		m.started = time.Now()
+		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, kinds[m.kindIdx], prompt))
+	}
 	if m.phase != phaseWorking {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -202,12 +287,13 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
 		m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), failed: true})
-		return m, loadBalanceCmd(m.client)
+		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), url: m.result})
-	return m, loadBalanceCmd(m.client)
+	// Auto-focus the output so 'o' opens the result immediately.
+	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 }
 
 // --- commands ---
@@ -249,7 +335,7 @@ func argsFor(kind, prompt string) (string, map[string]any) {
 	case "audio":
 		return "audio", map[string]any{"action": "speak", "text": prompt, "out": "audio.mp3"}
 	case "video":
-		return "video", map[string]any{"action": "scene", "scene_prompt": prompt, "prompt": prompt, "out": "video.mp4"}
+		return "video", map[string]any{"action": "create", "prompt": prompt, "out": "video.mp4"}
 	default:
 		return "image", map[string]any{"action": "create", "prompt": prompt, "out": "image.jpg"}
 	}
