@@ -66,7 +66,7 @@ func (m model) headerView(w int) string {
 	return bar + "\n" + rule
 }
 
-// Type selector chips.
+// Type selector chips. A leading marker shows when this zone has focus.
 func (m model) kindsView() string {
 	chips := make([]string, len(kinds))
 	for i, k := range kinds {
@@ -76,15 +76,20 @@ func (m model) kindsView() string {
 			chips[i] = styChip.Render(k)
 		}
 	}
-	return "\n" + lipgloss.JoinHorizontal(lipgloss.Top, chips...)
+	marker := styDim.Render("  ")
+	if m.focus == zoneTabs {
+		marker = styAcc.Render("▸ ")
+	}
+	return "\n" + marker + lipgloss.JoinHorizontal(lipgloss.Top, chips...)
 }
 
-// Composer: eyebrow label + bordered prompt input.
+// Composer: eyebrow label + bordered prompt input. The accent border lights up
+// only while the input zone is focused (and not mid-job).
 func (m model) composerView(w int) string {
 	label := styEyebrow.Render("DESCRIBE YOUR SHOT")
-	box := styPanelActive
-	if m.phase == phaseWorking {
-		box = styPanel
+	box := styPanel
+	if m.focus == zoneInput && m.phase != phaseWorking {
+		box = styPanelActive
 	}
 	field := box.Width(w - 4).Render(m.input.View())
 	return "\n" + label + "\n" + field
@@ -117,7 +122,7 @@ func (m model) statusView(w int) string {
 		}
 		inner := lipgloss.JoinVertical(lipgloss.Left, lines...)
 		return "\n" + styEyebrow.Render("RESULT") + "\n" +
-			styPanel.BorderForeground(colGreen).Width(w - 4).Render(inner)
+			styPanel.BorderForeground(colGreen).Width(w-4).Render(inner)
 
 	case phaseError:
 		return "\n" + styPanel.BorderForeground(colRed).Width(w-4).Render(
@@ -146,19 +151,32 @@ func (m model) historyView() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// helpView shows keys for the focused zone (so hints always match what the keys
+// actually do), plus a trailing zone tag.
 func (m model) helpView() string {
 	key := func(k, label string) string { return styKey.Render(k) + " " + styDim.Render(label) }
-	switch m.phase {
-	case phaseWorking:
-		return "\n" + key("esc", "quit")
-	case phaseDone:
+	sep := styDim.Render("   ")
+	zoneTag := func(name string) string { return sep + styDim.Render("· ") + styAcc.Render(name) }
+
+	if m.phase == phaseWorking {
+		return "\n" + strings.Join([]string{key("⇥", "pane"), key("ctrl+c", "quit")}, sep)
+	}
+	switch m.focus {
+	case zoneTabs:
 		return "\n" + strings.Join([]string{
-			key("o", "open"), key("⇥", "type"), key("enter", "new"), key("esc", "quit"),
-		}, styDim.Render("   "))
-	default:
+			key("←/→", "switch type"), key("enter", "write prompt"), key("⇥", "pane"), key("q", "quit"),
+		}, sep) + zoneTag("tabs")
+	case zoneOutput:
+		keys := []string{}
+		if m.phase == phaseDone && m.result != "" {
+			keys = append(keys, key("o", "open in browser"))
+		}
+		keys = append(keys, key("enter", "new"), key("⇥", "pane"), key("q", "quit"))
+		return "\n" + strings.Join(keys, sep) + zoneTag("output")
+	default: // zoneInput
 		return "\n" + strings.Join([]string{
-			key("⇥", "switch type"), key("enter", "generate"), key("esc", "quit"),
-		}, styDim.Render("   "))
+			key("enter", "generate"), key("esc", "leave field"), key("⇥", "pane"),
+		}, sep) + zoneTag("input")
 	}
 }
 
