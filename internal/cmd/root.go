@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/tui"
 	"github.com/spf13/cobra"
@@ -25,11 +23,12 @@ func Execute() error {
 		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		// No subcommand → launch the interactive TUI.
+		// No subcommand → launch the interactive TUI. It opens even when signed
+		// out (shows a "not signed in" state and prompts for `framehood login`).
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sess, err := NewSession(cfg)
 			if err != nil {
-				return fmt.Errorf("%w\n\nRun `framehood login` first", err)
+				return tui.Run(nil, "")
 			}
 			return tui.Run(sess.Client(), sess.Email())
 		},

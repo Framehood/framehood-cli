@@ -38,8 +38,9 @@ type historyItem struct {
 }
 
 type model struct {
-	client *mcp.Client
-	email  string
+	client   *mcp.Client
+	email    string
+	loggedIn bool
 
 	input    textinput.Model
 	spin     spinner.Model
@@ -69,17 +70,21 @@ func Run(client *mcp.Client, email string) error {
 	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
 
 	m := model{
-		client:  client,
-		email:   email,
-		input:   ti,
-		spin:    sp,
-		balance: "…",
+		client:   client,
+		email:    email,
+		loggedIn: client != nil,
+		input:    ti,
+		spin:     sp,
+		balance:  "…",
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
 
 func (m model) Init() tea.Cmd {
+	if !m.loggedIn {
+		return m.spin.Tick // signed-out: no balance to load
+	}
 	return tea.Batch(m.spin.Tick, loadBalanceCmd(m.client))
 }
 
@@ -125,6 +130,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.phase == phaseWorking {
+				return m, nil
+			}
+			if !m.loggedIn {
+				m.phase = phaseError
+				m.errMsg = "You're not signed in. Quit and run `framehood login` first."
 				return m, nil
 			}
 			prompt := strings.TrimSpace(m.input.Value())
