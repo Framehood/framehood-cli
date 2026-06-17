@@ -214,6 +214,9 @@ func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice s
 				action = "create"
 			}
 		}
+		if action == "scene" && actorID == "" {
+			return "", nil, fmt.Errorf("--actor is required for --type video --action scene")
+		}
 		args["action"] = action
 		args["prompt"] = prompt
 		if action == "scene" {
