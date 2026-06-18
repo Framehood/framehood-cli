@@ -19,15 +19,13 @@ import (
 	"github.com/Framehood/framehood-cli/internal/mcp"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
-
-// kinds are the generation types selectable in the studio.
-var kinds = []string{"image", "video", "audio"}
 
 type phase int
 
@@ -63,25 +61,28 @@ type model struct {
 	email    string
 	loggedIn bool
 
-	input   textinput.Model
-	spin    spinner.Model
-	help    help.Model
-	hist    table.Model
-	keys    keyMap
-	focus   focusZone
-	kindIdx int
-	phase   phase
-	status  string
-	balance string
-	result  string
-	errMsg  string
-	jobID   string
-	started time.Time
-	history []historyItem // chronological (append order)
-	rows    []historyItem // mirrors the table, newest-first; index by hist.Cursor()
-	notice  string        // transient action feedback ("copied", "saved → …")
-	width   int
-	height  int
+	input    textinput.Model
+	spin     spinner.Model
+	help     help.Model
+	hist     table.Model
+	nav      list.Model
+	keys     keyMap
+	focus    focusZone
+	action   actionSpec // the NAV-selected tool action
+	inflight actionSpec // action captured at submit time (for history attribution)
+	groupTop []int      // nav index of each tool group's first action (for 1-9 jumps)
+	phase    phase
+	status   string
+	balance  string
+	result   string
+	errMsg   string
+	jobID    string
+	started  time.Time
+	history  []historyItem // chronological (append order)
+	rows     []historyItem // mirrors the table, newest-first; index by hist.Cursor()
+	notice   string        // transient action feedback ("copied", "saved → …")
+	width    int
+	height   int
 }
 
 // Run starts the interactive studio.
@@ -96,6 +97,7 @@ func Run(client *mcp.Client, email string) error {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
 
+	nav, groupTop := buildNav()
 	m := model{
 		client:   client,
 		email:    email,
@@ -104,12 +106,66 @@ func Run(client *mcp.Client, email string) error {
 		spin:     sp,
 		help:     help.New(),
 		hist:     newHistoryTable(),
+		nav:      nav,
+		groupTop: groupTop,
+		action:   catalog[0].actions[0], // image · create (a runnable default)
 		keys:     defaultKeys(),
 		focus:    zoneInput, // start ready to type
 		balance:  "…",
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
+}
+
+// navItem adapts an actionSpec to the bubbles/list item interface.
+type navItem struct{ spec actionSpec }
+
+func (n navItem) Title() string {
+	if n.spec.runnable() {
+		return n.spec.tool + " · " + n.spec.action
+	}
+	return n.spec.tool + " · " + n.spec.action + " ›" // › = opens a form (later step)
+}
+func (n navItem) Description() string { return n.spec.summary }
+func (n navItem) FilterValue() string {
+	return n.spec.tool + " " + n.spec.action + " " + n.spec.summary
+}
+
+// buildNav flattens the catalog into the NAV list and records each tool group's
+// first index (for the 1-9 group jumps).
+func buildNav() (list.Model, []int) {
+	var items []list.Item
+	var groupTop []int
+	for _, g := range catalog {
+		groupTop = append(groupTop, len(items))
+		for _, a := range g.actions {
+			items = append(items, navItem{a})
+		}
+	}
+	d := list.NewDefaultDelegate()
+	d.ShowDescription = false
+	d.SetSpacing(0)
+	d.Styles.SelectedTitle = d.Styles.SelectedTitle.Foreground(colAccent).BorderForeground(colAccent)
+	d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(colText)
+	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Foreground(colDim)
+
+	l := list.New(items, d, 0, 0)
+	l.Title = "TOOLS"
+	l.Styles.Title = styEyebrow
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(true)
+	l.KeyMap.Quit.SetEnabled(false) // the studio owns quit/esc
+	return l, groupTop
+}
+
+// navSelected returns the actionSpec under the NAV cursor.
+func (m model) navSelected() (actionSpec, bool) {
+	it, ok := m.nav.SelectedItem().(navItem)
+	if !ok {
+		return actionSpec{}, false
+	}
+	return it.spec, true
 }
 
 // newHistoryTable builds the OUTPUT-pane history table. Rows are filled later
@@ -242,9 +298,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = msg.Width - 6
 		m.help.Width = msg.Width - 4
+		navH := msg.Height - 10
+		if navH < 4 {
+			navH = 4
+		}
+		m.nav.SetSize(msg.Width-4, navH)
 		m.rebuildHistory(false) // reflow but keep the user's selected row
 
 	case tea.KeyMsg:
+		// While the NAV filter input is active it owns every key (so typing a
+		// filter never triggers Tab / quit / jumps). ctrl+c still quits.
+		if m.focus == zoneTabs && m.nav.SettingFilter() {
+			if key.Matches(msg, m.keys.ForceQuit) {
+				return m, tea.Quit
+			}
+			var cmd tea.Cmd
+			m.nav, cmd = m.nav.Update(msg)
+			return m, cmd
+		}
 		// Global keys (any zone). Only non-typed keys live here, so they never
 		// steal characters from the prompt field.
 		switch {
@@ -311,25 +382,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateTabs: the image/video/audio selector is focused.
+// updateTabs: the NAV list is focused — browse/filter the tool→action catalog.
+// (Not in filter mode here; filtering is handled before zone routing.)
 func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit, m.keys.Esc):
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
-	case key.Matches(msg, m.keys.Left):
-		if m.phase != phaseWorking {
-			m.kindIdx = (m.kindIdx - 1 + len(kinds)) % len(kinds)
+		return m, nil
+	case msg.String() >= "1" && msg.String() <= "9":
+		if g := int(msg.String()[0] - '1'); g < len(m.groupTop) {
+			m.nav.Select(m.groupTop[g])
 		}
-	case key.Matches(msg, m.keys.Right):
-		if m.phase != phaseWorking {
-			m.kindIdx = (m.kindIdx + 1) % len(kinds)
+		return m, nil
+	case key.Matches(msg, m.keys.Write): // enter → pick this action
+		if spec, ok := m.navSelected(); ok {
+			m.action = spec
+			m.notice = ""
+			if spec.runnable() {
+				return m.setFocus(zoneInput), nil // go type the prompt
+			}
+			// Form-driven action: not yet submittable from the prompt box.
+			m.notice = styDim.Render("needs " + strings.Join(spec.needs, ", ") +
+				" — the input form arrives in the next update")
 		}
-	case key.Matches(msg, m.keys.Write): // enter
-		return m.setFocus(zoneInput), nil // jump straight to typing
+		return m, nil
 	}
-	return m, nil
+	// Everything else (↑↓ j/k, `/` to filter, page keys) drives the list.
+	var cmd tea.Cmd
+	m.nav, cmd = m.nav.Update(msg)
+	return m, cmd
 }
 
 // updateOutput: the history table is focused — ↑↓ select a past generation and
@@ -399,11 +482,20 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if prompt == "" {
 			return m, nil
 		}
+		if !m.action.runnable() {
+			// Selection moved to a form-driven action — can't submit from the
+			// prompt box yet. Send the user back to pick a runnable one.
+			m.notice = styDim.Render("needs " + strings.Join(m.action.needs, ", ") +
+				" — pick a runnable action")
+			return m.setFocus(zoneTabs), nil
+		}
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
+		m.inflight = m.action // attribute the result to the action as it was at submit
 		m.started = time.Now()
-		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, kinds[m.kindIdx], prompt))
+		tool, args := argsForAction(m.action, prompt)
+		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 	}
 	if m.phase != phaseWorking {
 		var cmd tea.Cmd
@@ -426,17 +518,21 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 			return pollTickMsg{jobID: j.ID}
 		}))
 	}
+	label := m.inflight.tool + "·" + m.inflight.action
+	if label == "·" { // no captured action (shouldn't happen) → fall back
+		label = m.action.tool + "·" + m.action.action
+	}
 	if j.Status == "failed" {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
-		m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), failed: true})
+		m.history = append(m.history, historyItem{kind: label, prompt: m.input.Value(), failed: true})
 		m.rebuildHistory(true)
 		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.notice = ""
-	m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), url: m.result})
+	m.history = append(m.history, historyItem{kind: label, prompt: m.input.Value(), url: m.result})
 	m.rebuildHistory(true)
 	// Auto-focus the output so o/c/s act on the just-finished (newest) row.
 	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
@@ -456,11 +552,10 @@ func loadBalanceCmd(c *mcp.Client) tea.Cmd {
 	}
 }
 
-func submitCmd(c *mcp.Client, kind, prompt string) tea.Cmd {
+func submitCmd(c *mcp.Client, tool string, args map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		tool, args := argsFor(kind, prompt)
 		job, err := c.Submit(ctx, tool, args)
 		return submittedMsg{job: job, err: err}
 	}
@@ -472,18 +567,6 @@ func pollCmd(c *mcp.Client, jobID string) tea.Cmd {
 		defer cancel()
 		job, err := c.GetStatus(ctx, jobID)
 		return polledMsg{job: job, err: err}
-	}
-}
-
-// argsFor maps a studio kind + prompt to an MCP tool call.
-func argsFor(kind, prompt string) (string, map[string]any) {
-	switch kind {
-	case "audio":
-		return "audio", map[string]any{"action": "speak", "text": prompt, "out": "audio.mp3"}
-	case "video":
-		return "video", map[string]any{"action": "create", "prompt": prompt, "out": "video.mp4"}
-	default:
-		return "image", map[string]any{"action": "create", "prompt": prompt, "out": "image.jpg"}
 	}
 }
 
