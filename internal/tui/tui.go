@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/Framehood/framehood-cli/internal/mcp"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -57,6 +59,8 @@ type model struct {
 
 	input   textinput.Model
 	spin    spinner.Model
+	help    help.Model
+	keys    keyMap
 	focus   focusZone
 	kindIdx int
 	phase   phase
@@ -89,6 +93,8 @@ func Run(client *mcp.Client, email string) error {
 		loggedIn: client != nil,
 		input:    ti,
 		spin:     sp,
+		help:     help.New(),
+		keys:     defaultKeys(),
 		focus:    zoneInput, // start ready to type
 		balance:  "…",
 	}
@@ -137,15 +143,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = msg.Width - 6
+		m.help.Width = msg.Width - 4
 
 	case tea.KeyMsg:
-		// Global keys (any zone).
-		switch msg.String() {
-		case "ctrl+c":
+		// Global keys (any zone). Only non-typed keys live here, so they never
+		// steal characters from the prompt field.
+		switch {
+		case key.Matches(msg, m.keys.ForceQuit):
 			return m, tea.Quit
-		case "tab":
+		case key.Matches(msg, m.keys.Tab):
 			return m.cycleFocus(1), nil
-		case "shift+tab":
+		case key.Matches(msg, m.keys.ShiftTab):
 			return m.cycleFocus(-1), nil
 		}
 		// Zone-routed keys.
@@ -198,18 +206,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateTabs: the image/video/audio selector is focused.
 func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc":
+	switch {
+	case key.Matches(msg, m.keys.Quit, m.keys.Esc):
 		return m, tea.Quit
-	case "left", "h":
+	case key.Matches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+	case key.Matches(msg, m.keys.Left):
 		if m.phase != phaseWorking {
 			m.kindIdx = (m.kindIdx - 1 + len(kinds)) % len(kinds)
 		}
-	case "right", "l":
+	case key.Matches(msg, m.keys.Right):
 		if m.phase != phaseWorking {
 			m.kindIdx = (m.kindIdx + 1) % len(kinds)
 		}
-	case "enter":
+	case key.Matches(msg, m.keys.Write): // enter
 		return m.setFocus(zoneInput), nil // jump straight to typing
 	}
 	return m, nil
@@ -218,14 +228,16 @@ func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // updateOutput: the result/history is focused — action keys live here, and the
 // input is blurred, so 'o' finally opens the browser instead of typing "o".
 func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc":
+	switch {
+	case key.Matches(msg, m.keys.Quit, m.keys.Esc):
 		return m, tea.Quit
-	case "o":
+	case key.Matches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+	case key.Matches(msg, m.keys.Open):
 		if m.phase == phaseDone && m.result != "" {
 			_ = openBrowser(m.result)
 		}
-	case "enter":
+	case key.Matches(msg, m.keys.New): // enter
 		// Start a fresh prompt.
 		if m.phase != phaseWorking {
 			m.phase = phaseIdle
@@ -240,10 +252,10 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // updateInput: the prompt field is focused — text editing happens here, and the
 // only control keys are esc (leave) and enter (submit).
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Esc):
 		return m.setFocus(zoneTabs), nil
-	case "enter":
+	case key.Matches(msg, m.keys.Generate): // enter
 		if m.phase == phaseWorking {
 			return m, nil
 		}
