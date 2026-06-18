@@ -46,9 +46,18 @@ func TestHistorySelection(t *testing.T) {
 
 func TestCreateNonColliding(t *testing.T) {
 	dir := t.TempDir()
-	cwd, _ := os.Getwd()
-	defer os.Chdir(cwd)
-	os.Chdir(dir)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir to temp: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	}()
 
 	f1, n1, err := createNonColliding("clip.mp4")
 	if err != nil || n1 != "clip.mp4" {
