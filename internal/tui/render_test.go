@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
@@ -18,11 +19,14 @@ func newTestModel() model {
 	ti := textinput.New()
 	ti.SetValue("a red fox in the snow")
 	sp := spinner.New()
-	return model{
+	m := model{
 		email: "kirill@framehood.ai", loggedIn: true, input: ti, spin: sp,
+		help: help.New(), hist: newHistoryTable(), keys: defaultKeys(),
 		balance: "1,640 credits", width: 78, kindIdx: 0,
 		history: []historyItem{{kind: "image", prompt: "a red fox in the snow"}},
 	}
+	m.rebuildHistory()
+	return m
 }
 
 func TestView_AllStatesRender(t *testing.T) {
@@ -38,13 +42,17 @@ func TestView_AllStatesRender(t *testing.T) {
 
 func TestView_Done_ShowsResult(t *testing.T) {
 	m := newTestModel()
+	url := "https://cdn.framehood.ai/job_abc.jpg"
+	// A finished job: a history row carrying the result URL, selected (newest).
+	m.history = []historyItem{{kind: "image", prompt: "a red fox in the snow", url: url}}
+	m.rebuildHistory()
 	m.phase = phaseDone
-	m.result = "https://cdn.framehood.ai/job_abc.jpg"
+	m.result = url
 	out := m.View()
 	if !strings.Contains(out, "done") {
 		t.Error("done view missing 'done'")
 	}
-	if !strings.Contains(out, m.result) {
+	if !strings.Contains(out, url) {
 		t.Error("done view missing the result URL")
 	}
 }
