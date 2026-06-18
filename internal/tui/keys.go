@@ -8,14 +8,14 @@ import "github.com/charmbracelet/bubbles/key"
 type keyMap struct {
 	Tab       key.Binding
 	ShiftTab  key.Binding
-	Left      key.Binding
-	Right     key.Binding
 	Write     key.Binding // enter, in the tabs zone → go write the prompt
 	Generate  key.Binding // enter, in the input zone → submit
 	New       key.Binding // enter, in the output zone → start over
 	Open      key.Binding // o, in the output zone → open selected result in browser
 	Copy      key.Binding // c, in the output zone → copy selected URL to clipboard
 	Save      key.Binding // s, in the output zone → download selected result
+	Use       key.Binding // u, in the output zone → chain the result into a new action
+	Palette   key.Binding // :, jump to the action filter from anywhere non-typing
 	Up        key.Binding // k/↑, move the history selection
 	Down      key.Binding // j/↓, move the history selection
 	Esc       key.Binding
@@ -28,14 +28,14 @@ func defaultKeys() keyMap {
 	return keyMap{
 		Tab:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "pane")),
 		ShiftTab:  key.NewBinding(key.WithKeys("shift+tab")),
-		Left:      key.NewBinding(key.WithKeys("left", "h")),
-		Right:     key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("←/→", "switch type")),
 		Write:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "write prompt")),
 		Generate:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "generate")),
 		New:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "new")),
 		Open:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open")),
 		Copy:      key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy url")),
 		Save:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "save")),
+		Use:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "use as input")),
+		Palette:   key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "find action")),
 		Up:        key.NewBinding(key.WithKeys("up", "k")),
 		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↑↓", "select")),
 		Esc:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "leave field")),
@@ -63,14 +63,14 @@ func (h helpContext) ShortHelp() []key.Binding {
 	}
 	switch h.focus {
 	case zoneTabs:
-		return []key.Binding{k.Right, k.Write, k.Tab, k.Help, k.Quit}
+		return []key.Binding{k.Write, k.Palette, k.Tab, k.Help, k.Quit}
 	case zoneOutput:
-		b := make([]key.Binding, 0, 8)
+		b := make([]key.Binding, 0, 9)
 		if h.hasRows {
 			b = append(b, k.Down) // ↑↓ select
 		}
 		if h.hasResult {
-			b = append(b, k.Open, k.Copy, k.Save)
+			b = append(b, k.Open, k.Copy, k.Save, k.Use)
 		}
 		return append(b, k.New, k.Tab, k.Help, k.Quit)
 	default: // zoneInput — q and ? are typed into the prompt here, so the bar
@@ -83,9 +83,9 @@ func (h helpContext) ShortHelp() []key.Binding {
 func (h helpContext) FullHelp() [][]key.Binding {
 	k := h.keys
 	return [][]key.Binding{
-		{k.Right, k.Write},               // tabs
-		{k.Generate, k.Esc},              // input
-		{k.Down, k.Open, k.Copy, k.Save}, // output
-		{k.New, k.Tab, k.Quit, k.ForceQuit},
+		{k.Write, k.Palette},                    // tabs (nav)
+		{k.Generate, k.Esc},                     // input
+		{k.Down, k.Open, k.Copy, k.Save, k.Use}, // output
+		{k.Palette, k.New, k.Tab, k.Quit, k.ForceQuit},
 	}
 }

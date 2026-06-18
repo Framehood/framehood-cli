@@ -141,3 +141,20 @@ func TestFormSummary(t *testing.T) {
 		t.Errorf("upscale summary = %q, want pic.jpg", s)
 	}
 }
+
+func TestChainSeedsForm(t *testing.T) {
+	m := newTestModel()
+	m.seedURL = "https://cdn.framehood.ai/prev.mp4"
+	// chain into video.upscale (first field is the media video_url)
+	m = m.startForm(findAction(t, "video", "upscale"))
+	if m.formVals["video_url"] != "https://cdn.framehood.ai/prev.mp4" {
+		t.Errorf("first media field not seeded: %v", m.formVals)
+	}
+	if m.seedURL != "" {
+		t.Error("seedURL should be cleared after seeding")
+	}
+	// field 0 input should show the seeded value
+	if m.input.Value() != "https://cdn.framehood.ai/prev.mp4" {
+		t.Errorf("field 0 input = %q, want the seed", m.input.Value())
+	}
+}
