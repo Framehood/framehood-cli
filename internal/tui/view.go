@@ -38,7 +38,13 @@ func (m model) View() string {
 	if h := m.historyView(); h != "" {
 		sections = append(sections, h)
 	}
-	sections = append(sections, styHelp.Render(m.helpView()))
+	hc := helpContext{
+		keys:      m.keys,
+		focus:     m.focus,
+		working:   m.phase == phaseWorking,
+		hasResult: m.phase == phaseDone && m.result != "",
+	}
+	sections = append(sections, "\n"+m.help.View(hc))
 
 	out := lipgloss.JoinVertical(lipgloss.Left, sections...)
 	return lipgloss.NewStyle().Padding(1, 1).Render(out)
@@ -149,35 +155,6 @@ func (m model) historyView() string {
 			dot, styDim.Render("["+h.kind+"]"), styMuted.Render(truncate(h.prompt, 52))))
 	}
 	return strings.TrimRight(b.String(), "\n")
-}
-
-// helpView shows keys for the focused zone (so hints always match what the keys
-// actually do), plus a trailing zone tag.
-func (m model) helpView() string {
-	key := func(k, label string) string { return styKey.Render(k) + " " + styDim.Render(label) }
-	sep := styDim.Render("   ")
-	zoneTag := func(name string) string { return sep + styDim.Render("· ") + styAcc.Render(name) }
-
-	if m.phase == phaseWorking {
-		return "\n" + strings.Join([]string{key("⇥", "pane"), key("ctrl+c", "quit")}, sep)
-	}
-	switch m.focus {
-	case zoneTabs:
-		return "\n" + strings.Join([]string{
-			key("←/→", "switch type"), key("enter", "write prompt"), key("⇥", "pane"), key("q", "quit"),
-		}, sep) + zoneTag("tabs")
-	case zoneOutput:
-		keys := []string{}
-		if m.phase == phaseDone && m.result != "" {
-			keys = append(keys, key("o", "open in browser"))
-		}
-		keys = append(keys, key("enter", "new"), key("⇥", "pane"), key("q", "quit"))
-		return "\n" + strings.Join(keys, sep) + zoneTag("output")
-	default: // zoneInput
-		return "\n" + strings.Join([]string{
-			key("enter", "generate"), key("esc", "leave field"), key("⇥", "pane"),
-		}, sep) + zoneTag("input")
-	}
 }
 
 func fmtDur(d time.Duration) string {
