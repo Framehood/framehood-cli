@@ -1,5 +1,7 @@
 package tui
 
+import "strings"
+
 // actionKind classifies what selecting an action does, so the studio can hint
 // the right next step and (later) render the right output.
 type actionKind int
@@ -111,6 +113,83 @@ var catalog = []toolGroup{
 // from the prompt box. Only valid when spec.runnable().
 func argsForAction(spec actionSpec, prompt string) (string, map[string]any) {
 	args := map[string]any{"action": spec.action, spec.promptField: prompt}
+	if spec.outName != "" {
+		args["out"] = spec.outName
+	}
+	return spec.tool, args
+}
+
+// paramKind controls how a form field is rendered and parsed.
+type paramKind int
+
+const (
+	pText      paramKind = iota // free text
+	pMedia                      // a single media URL (picker offers recent results)
+	pMediaList                  // comma-separated media URLs → []string
+)
+
+type paramSpec struct {
+	name     string
+	label    string
+	kind     paramKind
+	required bool
+}
+
+func (p paramSpec) isMedia() bool { return p.kind == pMedia || p.kind == pMediaList }
+
+// req/opt build a required/optional field (requiredness is schema, not label text).
+func req(name, label string, k paramKind) paramSpec { return paramSpec{name, label, k, true} }
+func opt(name, label string, k paramKind) paramSpec { return paramSpec{name, label, k, false} }
+
+// actionForms maps "tool.action" to the fields the studio collects for the
+// form-driven GENERATE actions, so they can run without the MCP prompt-only path.
+// Reads/manage actions (billing, org, files, actor mgmt) come in a later step.
+var actionForms = map[string][]paramSpec{
+	"image.edit":      {req("image_url", "source image", pMedia), req("prompt", "edit instruction", pText)},
+	"image.upscale":   {req("image_url", "source image", pMedia)},
+	"image.animate":   {req("image_url", "source image", pMedia), opt("prompt", "motion", pText)},
+	"video.edit":      {req("video_url", "source video", pMedia), req("prompt", "edit instruction", pText)},
+	"video.swap":      {req("video_url", "source video", pMedia), req("image_url", "swap-in image", pMedia)},
+	"video.lipsync":   {req("video_url", "face video", pMedia), req("audio_url", "voice audio", pMedia)},
+	"video.captions":  {req("video_url", "source video", pMedia)},
+	"video.upscale":   {req("video_url", "source video", pMedia)},
+	"video.reframe":   {req("video_url", "source video", pMedia)},
+	"video.mix_audio": {req("video_url", "source video", pMedia), req("tracks", "audio tracks (comma-sep)", pMediaList)},
+	"video.assemble":  {req("clips", "clips (comma-sep urls)", pMediaList)},
+	"audio.mix":       {req("tracks", "tracks (comma-sep urls)", pMediaList)},
+	"audio.concat":    {req("tracks", "tracks (comma-sep urls)", pMediaList)},
+	"qa.full":         {req("video", "video to check", pMedia)},
+	"qa.voice":        {req("audio", "audio to check", pMedia)},
+	"qa.transcript":   {req("video", "video to transcribe", pMedia)},
+	"qa.person":       {req("image1", "first face", pMedia), req("image2", "second face", pMedia)},
+	"qa.image":        {req("image_url", "image to check", pMedia), req("description", "what it should show", pText)},
+}
+
+func (a actionSpec) form() []paramSpec { return actionForms[a.tool+"."+a.action] }
+func (a actionSpec) hasForm() bool     { return len(actionForms[a.tool+"."+a.action]) > 0 }
+
+// argsForForm builds the MCP tool name + arguments from collected form values.
+// Media-list fields are split on commas into a []string.
+func argsForForm(spec actionSpec, vals map[string]string) (string, map[string]any) {
+	args := map[string]any{"action": spec.action}
+	for _, f := range spec.form() {
+		v := strings.TrimSpace(vals[f.name])
+		if v == "" {
+			continue
+		}
+		if f.kind == pMediaList {
+			parts := strings.Split(v, ",")
+			list := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if s := strings.TrimSpace(p); s != "" {
+					list = append(list, s)
+				}
+			}
+			args[f.name] = list
+		} else {
+			args[f.name] = v
+		}
+	}
 	if spec.outName != "" {
 		args["out"] = spec.outName
 	}

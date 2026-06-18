@@ -86,16 +86,43 @@ func (m model) navView() string {
 	return "\n" + styDim.Render("  ") + chip + hint
 }
 
-// Composer: eyebrow label + bordered prompt input. The accent border lights up
-// only while the input zone is focused (and not mid-job).
+// Composer: eyebrow label + bordered input. In form mode it renders the action's
+// fields (the active one editable); otherwise it's the single prompt box.
 func (m model) composerView(w int) string {
-	label := styEyebrow.Render("DESCRIBE YOUR SHOT")
 	box := styPanel
 	if m.focus == zoneInput && m.phase != phaseWorking {
 		box = styPanelActive
 	}
+	if len(m.formFields) > 0 {
+		return m.formComposerView(w, box)
+	}
+	label := styEyebrow.Render(strings.ToUpper(m.action.tool + " · " + m.action.action))
 	field := box.Width(w - 4).Render(m.input.View())
 	return "\n" + label + "\n" + field
+}
+
+// formComposerView stacks the form fields, the active one showing the live input.
+func (m model) formComposerView(w int, box lipgloss.Style) string {
+	label := styEyebrow.Render(strings.ToUpper(m.action.tool+" · "+m.action.action)) +
+		styDim.Render(fmt.Sprintf("   field %d/%d", m.formIdx+1, len(m.formFields)))
+	var rows []string
+	for i, f := range m.formFields {
+		name := styDim.Render(f.label)
+		if i == m.formIdx {
+			rows = append(rows, styAcc.Render("▸ ")+name)
+			rows = append(rows, box.Width(w-6).Render(m.input.View()))
+			continue
+		}
+		val := m.formVals[f.name]
+		if val == "" {
+			val = styDim.Render("—")
+		} else {
+			val = styText.Render(truncate(val, w-10))
+		}
+		rows = append(rows, styDim.Render("  ")+name+styDim.Render(": ")+val)
+	}
+	hint := styDim.Render("enter/↓ next · ↑ back · esc cancel")
+	return "\n" + label + "\n" + lipgloss.JoinVertical(lipgloss.Left, rows...) + "\n" + hint
 }
 
 // Status: working spinner, done result panel, or an error line.
