@@ -61,16 +61,17 @@ type model struct {
 	email    string
 	loggedIn bool
 
-	input    textinput.Model
-	spin     spinner.Model
-	help     help.Model
-	hist     table.Model
-	nav      list.Model
-	keys     keyMap
-	focus    focusZone
-	action   actionSpec // the NAV-selected tool action
-	inflight actionSpec // action captured at submit time (for history attribution)
-	groupTop []int      // nav index of each tool group's first action (for 1-9 jumps)
+	input         textinput.Model
+	spin          spinner.Model
+	help          help.Model
+	hist          table.Model
+	nav           list.Model
+	keys          keyMap
+	focus         focusZone
+	action        actionSpec // the NAV-selected tool action
+	inflight      actionSpec // action captured at submit time (for history attribution)
+	inflightLabel string     // the submitted prompt/summary, for the history row
+	groupTop      []int      // nav index of each tool group's first action (for 1-9 jumps)
 
 	// form mode: when formFields is non-empty the prompt box is a sequential
 	// per-parameter field editor for a form-driven action.
@@ -131,7 +132,7 @@ func (n navItem) Title() string {
 	if n.spec.runnable() {
 		return n.spec.tool + " · " + n.spec.action
 	}
-	return n.spec.tool + " · " + n.spec.action + " ›" // › = opens a form (later step)
+	return n.spec.tool + " · " + n.spec.action + " ›" // › = opens a parameter form
 }
 func (n navItem) Description() string { return n.spec.summary }
 func (n navItem) FilterValue() string {
@@ -506,11 +507,50 @@ func (m model) latestResultURL() string {
 func (m model) formMissing() string {
 	var miss []string
 	for _, f := range m.formFields {
-		if strings.TrimSpace(m.formVals[f.name]) == "" {
+		if !f.required {
+			continue
+		}
+		raw := strings.TrimSpace(m.formVals[f.name])
+		if f.kind == pMediaList {
+			valid := 0
+			for _, p := range strings.Split(raw, ",") {
+				if strings.TrimSpace(p) != "" {
+					valid++
+				}
+			}
+			if valid == 0 {
+				miss = append(miss, f.label)
+			}
+			continue
+		}
+		if raw == "" {
 			miss = append(miss, f.label)
 		}
 	}
 	return strings.Join(miss, ", ")
+}
+
+// formSummary is a short human label for a form submission, used as the history
+// prompt (there's no single prompt field). Prefers the text field(s), else a
+// media basename, else the action name.
+func (m model) formSummary() string {
+	var texts []string
+	for _, f := range m.formFields {
+		if f.kind == pText {
+			if v := strings.TrimSpace(m.formVals[f.name]); v != "" {
+				texts = append(texts, v)
+			}
+		}
+	}
+	if len(texts) > 0 {
+		return strings.Join(texts, " · ")
+	}
+	for _, f := range m.formFields {
+		if v := strings.TrimSpace(m.formVals[f.name]); v != "" {
+			return outputFilename(v)
+		}
+	}
+	return m.action.action
 }
 
 // updateForm drives the sequential field editor: enter/↓ advance (and submit on
@@ -573,6 +613,7 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	m.status = "submitting"
 	m.result, m.errMsg, m.jobID = "", "", ""
 	m.inflight = m.action
+	m.inflightLabel = m.formSummary()
 	m.started = time.Now()
 	m.formFields = nil
 	m.input.SetValue("")
@@ -613,6 +654,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
 		m.inflight = m.action // attribute the result to the action as it was at submit
+		m.inflightLabel = prompt
 		m.started = time.Now()
 		tool, args := argsForAction(m.action, prompt)
 		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
@@ -642,17 +684,21 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 	if label == "·" { // no captured action (shouldn't happen) → fall back
 		label = m.action.tool + "·" + m.action.action
 	}
+	prompt := m.inflightLabel // captured at submit (form mode clears the input box)
+	if prompt == "" {
+		prompt = m.input.Value()
+	}
 	if j.Status == "failed" {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
-		m.history = append(m.history, historyItem{kind: label, prompt: m.input.Value(), failed: true})
+		m.history = append(m.history, historyItem{kind: label, prompt: prompt, failed: true})
 		m.rebuildHistory(true)
 		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.notice = ""
-	m.history = append(m.history, historyItem{kind: label, prompt: m.input.Value(), url: m.result})
+	m.history = append(m.history, historyItem{kind: label, prompt: prompt, url: m.result})
 	m.rebuildHistory(true)
 	// Auto-focus the output so o/c/s act on the just-finished (newest) row.
 	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)

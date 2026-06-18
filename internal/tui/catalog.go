@@ -129,35 +129,40 @@ const (
 )
 
 type paramSpec struct {
-	name  string
-	label string
-	kind  paramKind
+	name     string
+	label    string
+	kind     paramKind
+	required bool
 }
 
 func (p paramSpec) isMedia() bool { return p.kind == pMedia || p.kind == pMediaList }
+
+// req/opt build a required/optional field (requiredness is schema, not label text).
+func req(name, label string, k paramKind) paramSpec { return paramSpec{name, label, k, true} }
+func opt(name, label string, k paramKind) paramSpec { return paramSpec{name, label, k, false} }
 
 // actionForms maps "tool.action" to the fields the studio collects for the
 // form-driven GENERATE actions, so they can run without the MCP prompt-only path.
 // Reads/manage actions (billing, org, files, actor mgmt) come in a later step.
 var actionForms = map[string][]paramSpec{
-	"image.edit":      {{"image_url", "source image", pMedia}, {"prompt", "edit instruction", pText}},
-	"image.upscale":   {{"image_url", "source image", pMedia}},
-	"image.animate":   {{"image_url", "source image", pMedia}, {"prompt", "motion (optional)", pText}},
-	"video.edit":      {{"video_url", "source video", pMedia}, {"prompt", "edit instruction", pText}},
-	"video.swap":      {{"video_url", "source video", pMedia}, {"image_url", "swap-in image", pMedia}},
-	"video.lipsync":   {{"video_url", "face video", pMedia}, {"audio_url", "voice audio", pMedia}},
-	"video.captions":  {{"video_url", "source video", pMedia}},
-	"video.upscale":   {{"video_url", "source video", pMedia}},
-	"video.reframe":   {{"video_url", "source video", pMedia}},
-	"video.mix_audio": {{"video_url", "source video", pMedia}, {"tracks", "audio tracks (comma-sep)", pMediaList}},
-	"video.assemble":  {{"clips", "clips (comma-sep urls)", pMediaList}},
-	"audio.mix":       {{"tracks", "tracks (comma-sep urls)", pMediaList}},
-	"audio.concat":    {{"tracks", "tracks (comma-sep urls)", pMediaList}},
-	"qa.full":         {{"video", "video to check", pMedia}},
-	"qa.voice":        {{"audio", "audio to check", pMedia}},
-	"qa.transcript":   {{"video", "video to transcribe", pMedia}},
-	"qa.person":       {{"image1", "first face", pMedia}, {"image2", "second face", pMedia}},
-	"qa.image":        {{"image_url", "image to check", pMedia}, {"description", "what it should show", pText}},
+	"image.edit":      {req("image_url", "source image", pMedia), req("prompt", "edit instruction", pText)},
+	"image.upscale":   {req("image_url", "source image", pMedia)},
+	"image.animate":   {req("image_url", "source image", pMedia), opt("prompt", "motion", pText)},
+	"video.edit":      {req("video_url", "source video", pMedia), req("prompt", "edit instruction", pText)},
+	"video.swap":      {req("video_url", "source video", pMedia), req("image_url", "swap-in image", pMedia)},
+	"video.lipsync":   {req("video_url", "face video", pMedia), req("audio_url", "voice audio", pMedia)},
+	"video.captions":  {req("video_url", "source video", pMedia)},
+	"video.upscale":   {req("video_url", "source video", pMedia)},
+	"video.reframe":   {req("video_url", "source video", pMedia)},
+	"video.mix_audio": {req("video_url", "source video", pMedia), req("tracks", "audio tracks (comma-sep)", pMediaList)},
+	"video.assemble":  {req("clips", "clips (comma-sep urls)", pMediaList)},
+	"audio.mix":       {req("tracks", "tracks (comma-sep urls)", pMediaList)},
+	"audio.concat":    {req("tracks", "tracks (comma-sep urls)", pMediaList)},
+	"qa.full":         {req("video", "video to check", pMedia)},
+	"qa.voice":        {req("audio", "audio to check", pMedia)},
+	"qa.transcript":   {req("video", "video to transcribe", pMedia)},
+	"qa.person":       {req("image1", "first face", pMedia), req("image2", "second face", pMedia)},
+	"qa.image":        {req("image_url", "image to check", pMedia), req("description", "what it should show", pText)},
 }
 
 func (a actionSpec) form() []paramSpec { return actionForms[a.tool+"."+a.action] }

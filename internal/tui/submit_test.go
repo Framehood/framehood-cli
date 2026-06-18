@@ -107,3 +107,37 @@ func TestFormFlow(t *testing.T) {
 		t.Error("form mode should end after submit")
 	}
 }
+
+func TestFormMissing_OptionalAndMediaList(t *testing.T) {
+	// animate: image_url required, prompt optional → only image_url needed
+	m := newTestModel().startForm(findAction(t, "image", "animate"))
+	m.formVals = map[string]string{"image_url": "https://x/i.jpg"}
+	if miss := m.formMissing(); miss != "" {
+		t.Errorf("animate w/ image_url only: missing=%q, want none (prompt optional)", miss)
+	}
+	// audio.mix tracks is a required media-list — comma-only is NOT valid
+	mix := newTestModel().startForm(findAction(t, "audio", "mix"))
+	mix.formVals = map[string]string{"tracks": " , ,"}
+	if mix.formMissing() == "" {
+		t.Error("comma-only media-list must be flagged missing")
+	}
+	mix.formVals = map[string]string{"tracks": "https://x/1.mp3"}
+	if miss := mix.formMissing(); miss != "" {
+		t.Errorf("one valid track should pass, missing=%q", miss)
+	}
+}
+
+func TestFormSummary(t *testing.T) {
+	// a text field → summary is that text (history prompt for form submits)
+	edit := newTestModel().startForm(findAction(t, "image", "edit"))
+	edit.formVals = map[string]string{"image_url": "https://x/i.jpg", "prompt": "make it night"}
+	if s := edit.formSummary(); s != "make it night" {
+		t.Errorf("edit summary = %q, want the prompt", s)
+	}
+	// no text field → summary is the media basename
+	up := newTestModel().startForm(findAction(t, "image", "upscale"))
+	up.formVals = map[string]string{"image_url": "https://x/pic.jpg?t=1"}
+	if s := up.formSummary(); s != "pic.jpg" {
+		t.Errorf("upscale summary = %q, want pic.jpg", s)
+	}
+}
