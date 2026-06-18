@@ -29,7 +29,7 @@ func (m model) View() string {
 	var sections []string
 
 	sections = append(sections, m.headerView(w))
-	sections = append(sections, m.kindsView())
+	sections = append(sections, m.navView())
 	sections = append(sections, m.composerView(w))
 
 	if body := m.statusView(w); body != "" {
@@ -74,21 +74,16 @@ func (m model) headerView(w int) string {
 	return bar + "\n" + rule
 }
 
-// Type selector chips. A leading marker shows when this zone has focus.
-func (m model) kindsView() string {
-	chips := make([]string, len(kinds))
-	for i, k := range kinds {
-		if i == m.kindIdx {
-			chips[i] = styChipActive.Render(k)
-		} else {
-			chips[i] = styChip.Render(k)
-		}
-	}
-	marker := styDim.Render("  ")
+// navView shows the tool→action catalog. When the NAV pane is focused it's the
+// full browsable/filterable list; otherwise it collapses to the active action
+// chip so the rest of the studio has room.
+func (m model) navView() string {
 	if m.focus == zoneTabs {
-		marker = styAcc.Render("▸ ")
+		return "\n" + m.nav.View()
 	}
-	return "\n" + marker + lipgloss.JoinHorizontal(lipgloss.Top, chips...)
+	chip := styChipActive.Render(m.action.tool + " · " + m.action.action)
+	hint := styDim.Render("  tab to change")
+	return "\n" + styDim.Render("  ") + chip + hint
 }
 
 // Composer: eyebrow label + bordered prompt input. The accent border lights up
