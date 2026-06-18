@@ -71,18 +71,25 @@ type model struct {
 	action   actionSpec // the NAV-selected tool action
 	inflight actionSpec // action captured at submit time (for history attribution)
 	groupTop []int      // nav index of each tool group's first action (for 1-9 jumps)
-	phase    phase
-	status   string
-	balance  string
-	result   string
-	errMsg   string
-	jobID    string
-	started  time.Time
-	history  []historyItem // chronological (append order)
-	rows     []historyItem // mirrors the table, newest-first; index by hist.Cursor()
-	notice   string        // transient action feedback ("copied", "saved → …")
-	width    int
-	height   int
+
+	// form mode: when formFields is non-empty the prompt box is a sequential
+	// per-parameter field editor for a form-driven action.
+	formFields []paramSpec
+	formIdx    int
+	formVals   map[string]string
+
+	phase   phase
+	status  string
+	balance string
+	result  string
+	errMsg  string
+	jobID   string
+	started time.Time
+	history []historyItem // chronological (append order)
+	rows    []historyItem // mirrors the table, newest-first; index by hist.Cursor()
+	notice  string        // transient action feedback ("copied", "saved → …")
+	width   int
+	height  int
 }
 
 // Run starts the interactive studio.
@@ -400,12 +407,16 @@ func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if spec, ok := m.navSelected(); ok {
 			m.action = spec
 			m.notice = ""
-			if spec.runnable() {
+			switch {
+			case spec.runnable():
+				m.formFields = nil
+				m.input.Placeholder = "Describe what to create…"
 				return m.setFocus(zoneInput), nil // go type the prompt
+			case spec.hasForm():
+				return m.startForm(spec), nil
+			default:
+				m.notice = styDim.Render(spec.tool + "·" + spec.action + " isn't available in the studio yet")
 			}
-			// Form-driven action: not yet submittable from the prompt box.
-			m.notice = styDim.Render("needs " + strings.Join(spec.needs, ", ") +
-				" — the input form arrives in the next update")
 		}
 		return m, nil
 	}
@@ -463,9 +474,118 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// startForm enters per-parameter form mode for a form-driven action, reusing the
+// prompt box as a sequential field editor.
+func (m model) startForm(spec actionSpec) model {
+	m.action = spec
+	m.formFields = spec.form()
+	m.formIdx = 0
+	m.formVals = map[string]string{}
+	m.notice = ""
+	m.input.SetValue("")
+	m.input.Placeholder = formPlaceholder(m.formFields[0])
+	return m.setFocus(zoneInput)
+}
+
+func formPlaceholder(p paramSpec) string {
+	if p.isMedia() {
+		return p.label + " — paste a URL (ctrl+r = latest result)"
+	}
+	return p.label
+}
+
+func (m model) latestResultURL() string {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].url != "" {
+			return m.history[i].url
+		}
+	}
+	return ""
+}
+
+func (m model) formMissing() string {
+	var miss []string
+	for _, f := range m.formFields {
+		if strings.TrimSpace(m.formVals[f.name]) == "" {
+			miss = append(miss, f.label)
+		}
+	}
+	return strings.Join(miss, ", ")
+}
+
+// updateForm drives the sequential field editor: enter/↓ advance (and submit on
+// the last field), ↑ goes back, esc cancels, ctrl+r fills a media field with the
+// latest result. j/k are NOT bound here so they type normally.
+func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	cur := m.formFields[m.formIdx]
+	save := func() { m.formVals[cur.name] = strings.TrimSpace(m.input.Value()) }
+	gotoField := func(i int) {
+		m.formIdx = i
+		m.input.SetValue(m.formVals[m.formFields[i].name])
+		m.input.Placeholder = formPlaceholder(m.formFields[i])
+	}
+	switch msg.String() {
+	case "esc":
+		m.formFields, m.formVals = nil, nil
+		m.input.SetValue("")
+		m.input.Placeholder = "Describe what to create…"
+		return m.setFocus(zoneTabs), nil
+	case "ctrl+r":
+		if cur.isMedia() {
+			if u := m.latestResultURL(); u != "" {
+				m.input.SetValue(u)
+			}
+		}
+		return m, nil
+	case "up":
+		save()
+		if m.formIdx > 0 {
+			gotoField(m.formIdx - 1)
+		}
+		return m, nil
+	case "enter", "down":
+		save()
+		if m.formIdx < len(m.formFields)-1 {
+			gotoField(m.formIdx + 1)
+			return m, nil
+		}
+		if miss := m.formMissing(); miss != "" {
+			m.notice = styRed.Render("fill in: " + miss)
+			return m, nil
+		}
+		return m.submitForm()
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// submitForm builds the args from the collected values and dispatches the job.
+func (m model) submitForm() (tea.Model, tea.Cmd) {
+	if !m.loggedIn {
+		m.phase = phaseError
+		m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+		m.formFields = nil
+		return m.setFocus(zoneOutput), nil
+	}
+	tool, args := argsForForm(m.action, m.formVals)
+	m.phase = phaseWorking
+	m.status = "submitting"
+	m.result, m.errMsg, m.jobID = "", "", ""
+	m.inflight = m.action
+	m.started = time.Now()
+	m.formFields = nil
+	m.input.SetValue("")
+	m.input.Placeholder = "Describe what to create…"
+	return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
+}
+
 // updateInput: the prompt field is focused — text editing happens here, and the
 // only control keys are esc (leave) and enter (submit).
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.formFields) > 0 {
+		return m.updateForm(msg)
+	}
 	switch {
 	case key.Matches(msg, m.keys.Esc):
 		return m.setFocus(zoneTabs), nil
