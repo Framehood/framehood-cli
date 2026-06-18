@@ -68,7 +68,8 @@ type model struct {
 	nav      list.Model
 	keys     keyMap
 	focus    focusZone
-	action   actionSpec // the currently selected tool action
+	action   actionSpec // the NAV-selected tool action
+	inflight actionSpec // action captured at submit time (for history attribution)
 	groupTop []int      // nav index of each tool group's first action (for 1-9 jumps)
 	phase    phase
 	status   string
@@ -481,9 +482,17 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if prompt == "" {
 			return m, nil
 		}
+		if !m.action.runnable() {
+			// Selection moved to a form-driven action — can't submit from the
+			// prompt box yet. Send the user back to pick a runnable one.
+			m.notice = styDim.Render("needs " + strings.Join(m.action.needs, ", ") +
+				" — pick a runnable action")
+			return m.setFocus(zoneTabs), nil
+		}
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
+		m.inflight = m.action // attribute the result to the action as it was at submit
 		m.started = time.Now()
 		tool, args := argsForAction(m.action, prompt)
 		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
@@ -509,17 +518,21 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 			return pollTickMsg{jobID: j.ID}
 		}))
 	}
+	label := m.inflight.tool + "·" + m.inflight.action
+	if label == "·" { // no captured action (shouldn't happen) → fall back
+		label = m.action.tool + "·" + m.action.action
+	}
 	if j.Status == "failed" {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
-		m.history = append(m.history, historyItem{kind: m.action.tool + "·" + m.action.action, prompt: m.input.Value(), failed: true})
+		m.history = append(m.history, historyItem{kind: label, prompt: m.input.Value(), failed: true})
 		m.rebuildHistory(true)
 		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.notice = ""
-	m.history = append(m.history, historyItem{kind: m.action.tool + "·" + m.action.action, prompt: m.input.Value(), url: m.result})
+	m.history = append(m.history, historyItem{kind: label, prompt: m.input.Value(), url: m.result})
 	m.rebuildHistory(true)
 	// Auto-focus the output so o/c/s act on the just-finished (newest) row.
 	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)

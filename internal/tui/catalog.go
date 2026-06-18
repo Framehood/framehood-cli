@@ -102,6 +102,9 @@ var catalog = []toolGroup{
 		{"org", "invite", "invite a member", kindManage, "", "", []string{"email"}},
 		{"org", "remove", "remove a member", kindManage, "", "", []string{"email"}},
 	}},
+	{"get_status", "Job status", []actionSpec{
+		{"get_status", "check", "check a job by id", kindRead, "", "", []string{"job_id"}},
+	}},
 }
 
 // argsForAction builds the MCP tool name + arguments to submit a runnable action
