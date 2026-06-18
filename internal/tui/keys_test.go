@@ -40,9 +40,12 @@ func TestShortHelp_FocusAware(t *testing.T) {
 		t.Error("output zone with a result should advertise o")
 	}
 
-	// Tabs zone lists the type switcher.
+	// Tabs (NAV) zone lists the action picker keys: write (enter) + the palette.
 	tabs := helpContext{keys: k, focus: zoneTabs}
-	if !helpListed(tabs, "right") {
-		t.Error("tabs zone help should list the ←/→ type switch")
+	if !helpListed(tabs, "enter") {
+		t.Error("tabs zone help should list enter (pick action)")
+	}
+	if !helpListed(tabs, ":") {
+		t.Error("tabs zone help should list : (find action)")
 	}
 }

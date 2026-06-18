@@ -78,6 +78,7 @@ type model struct {
 	formFields []paramSpec
 	formIdx    int
 	formVals   map[string]string
+	seedURL    string // a result URL to chain into the next form's first media field
 
 	phase   phase
 	status  string
@@ -399,6 +400,8 @@ func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
+	case key.Matches(msg, m.keys.Palette): // : → start filtering (palette)
+		return m.openPalette()
 	case msg.String() >= "1" && msg.String() <= "9":
 		if g := int(msg.String()[0] - '1'); g < len(m.groupTop) {
 			m.nav.Select(m.groupTop[g])
@@ -464,6 +467,15 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, saveCmd(it.url)
 		}
 		return m, nil
+	case key.Matches(msg, m.keys.Use): // chain this result into a new action
+		if it, ok := m.selectedItem(); ok && it.url != "" {
+			m.seedURL = it.url
+			m.notice = styAcc.Render("chaining result → pick an action that takes media")
+			return m.openPalette()
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Palette):
+		return m.openPalette()
 	case key.Matches(msg, m.keys.New): // enter
 		if m.phase != phaseWorking {
 			m.phase = phaseIdle
@@ -482,10 +494,29 @@ func (m model) startForm(spec actionSpec) model {
 	m.formFields = spec.form()
 	m.formIdx = 0
 	m.formVals = map[string]string{}
+	// Chaining: drop a carried-over result URL into the first media field.
+	if m.seedURL != "" {
+		for _, f := range m.formFields {
+			if f.isMedia() {
+				m.formVals[f.name] = m.seedURL
+				break
+			}
+		}
+		m.seedURL = ""
+	}
 	m.notice = ""
-	m.input.SetValue("")
+	m.input.SetValue(m.formVals[m.formFields[0].name]) // shows the seed if field 0 is media
 	m.input.Placeholder = formPlaceholder(m.formFields[0])
 	return m.setFocus(zoneInput)
+}
+
+// openPalette focuses the NAV list and immediately starts its filter, so the
+// user can fuzzy-jump to any action from anywhere (a lightweight command palette).
+func (m model) openPalette() (tea.Model, tea.Cmd) {
+	m = m.setFocus(zoneTabs)
+	var cmd tea.Cmd
+	m.nav, cmd = m.nav.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	return m, cmd
 }
 
 func formPlaceholder(p paramSpec) string {
