@@ -25,7 +25,7 @@ func newTestModel() model {
 		balance: "1,640 credits", width: 78, kindIdx: 0,
 		history: []historyItem{{kind: "image", prompt: "a red fox in the snow"}},
 	}
-	m.rebuildHistory()
+	m.rebuildHistory(true)
 	return m
 }
 
@@ -45,7 +45,7 @@ func TestView_Done_ShowsResult(t *testing.T) {
 	url := "https://cdn.framehood.ai/job_abc.jpg"
 	// A finished job: a history row carrying the result URL, selected (newest).
 	m.history = []historyItem{{kind: "image", prompt: "a red fox in the snow", url: url}}
-	m.rebuildHistory()
+	m.rebuildHistory(true)
 	m.phase = phaseDone
 	m.result = url
 	out := m.View()

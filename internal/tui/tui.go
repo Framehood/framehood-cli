@@ -133,8 +133,11 @@ func newHistoryTable() table.Model {
 }
 
 // rebuildHistory refreshes the table rows (newest first) and the parallel
-// `rows` slice used to resolve the selection, keeping the newest row selected.
-func (m *model) rebuildHistory() {
+// `rows` slice used to resolve the selection. selectNewest moves the cursor to
+// the newest row (job completion); otherwise the current selection is preserved
+// (e.g. a resize reflow must not yank the user off the row they were viewing).
+func (m *model) rebuildHistory(selectNewest bool) {
+	prev := m.hist.Cursor()
 	cols := tableWidth(m.width)
 	m.hist.SetColumns([]table.Column{
 		{Title: "", Width: 2},
@@ -152,7 +155,16 @@ func (m *model) rebuildHistory() {
 	m.rows = items
 	m.hist.SetRows(rows)
 	if len(rows) > 0 {
-		m.hist.SetCursor(0) // newest
+		switch {
+		case selectNewest:
+			m.hist.SetCursor(0) // newest
+		case prev >= len(rows):
+			m.hist.SetCursor(len(rows) - 1)
+		case prev < 0:
+			m.hist.SetCursor(0)
+		default:
+			m.hist.SetCursor(prev)
+		}
 	}
 	h := len(rows)
 	if h > 6 {
@@ -230,7 +242,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = msg.Width - 6
 		m.help.Width = msg.Width - 4
-		m.rebuildHistory() // reflow the prompt column to the new width
+		m.rebuildHistory(false) // reflow but keep the user's selected row
 
 	case tea.KeyMsg:
 		// Global keys (any zone). Only non-typed keys live here, so they never
@@ -418,14 +430,14 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
 		m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), failed: true})
-		m.rebuildHistory()
+		m.rebuildHistory(true)
 		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.notice = ""
 	m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), url: m.result})
-	m.rebuildHistory()
+	m.rebuildHistory(true)
 	// Auto-focus the output so o/c/s act on the just-finished (newest) row.
 	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 }
@@ -540,9 +552,9 @@ func outputFilename(rawURL string) string {
 	return name
 }
 
-// saveResult downloads rawURL to ./<basename>, returning the written path.
+// saveResult downloads rawURL to a non-colliding path in the current directory,
+// returning the written path. It never overwrites an existing file.
 func saveResult(rawURL string) (string, error) {
-	name := outputFilename(rawURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -557,13 +569,42 @@ func saveResult(rawURL string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("http %d", resp.StatusCode)
 	}
-	f, err := os.Create(name)
+
+	// Create exclusively, picking the next free "name", "name-1", … so repeated
+	// saves never clobber an earlier file.
+	f, name, err := createNonColliding(outputFilename(rawURL))
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(name)
+		return "", err
+	}
+	if err := f.Close(); err != nil { // surface the final flush error
+		os.Remove(name)
 		return "", err
 	}
 	return name, nil
+}
+
+// createNonColliding O_EXCL-creates the first free of base, base-1, base-2, …
+// in the current directory, returning the open file and its name.
+func createNonColliding(base string) (*os.File, string, error) {
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 0; i < 1000; i++ {
+		name := base
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d%s", stem, i, ext)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("could not find a free filename for %q", base)
 }

@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestOutputFilename(t *testing.T) {
 	cases := map[string]string{
@@ -25,7 +28,7 @@ func TestHistorySelection(t *testing.T) {
 		{kind: "image", prompt: "first", url: "https://x/1.jpg"},
 		{kind: "video", prompt: "second", url: "https://x/2.mp4"},
 	}
-	m.rebuildHistory()
+	m.rebuildHistory(true)
 
 	// newest (second) is selected by default
 	if it, ok := m.selectedItem(); !ok || it.prompt != "second" {
@@ -38,5 +41,27 @@ func TestHistorySelection(t *testing.T) {
 	}
 	if len(m.rows) != 2 {
 		t.Fatalf("rows len = %d, want 2", len(m.rows))
+	}
+}
+
+func TestCreateNonColliding(t *testing.T) {
+	dir := t.TempDir()
+	cwd, _ := os.Getwd()
+	defer os.Chdir(cwd)
+	os.Chdir(dir)
+
+	f1, n1, err := createNonColliding("clip.mp4")
+	if err != nil || n1 != "clip.mp4" {
+		t.Fatalf("first = %q err=%v, want clip.mp4", n1, err)
+	}
+	f1.Close()
+	// second save of the same name must NOT clobber → clip-1.mp4
+	f2, n2, err := createNonColliding("clip.mp4")
+	if err != nil || n2 != "clip-1.mp4" {
+		t.Fatalf("second = %q err=%v, want clip-1.mp4", n2, err)
+	}
+	f2.Close()
+	if _, err := os.Stat("clip.mp4"); err != nil {
+		t.Fatal("original clip.mp4 should be untouched")
 	}
 }
