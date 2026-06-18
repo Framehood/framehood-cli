@@ -38,11 +38,13 @@ func (m model) View() string {
 	if h := m.historyView(); h != "" {
 		sections = append(sections, h)
 	}
+	sel, selOK := m.selectedItem()
 	hc := helpContext{
 		keys:      m.keys,
 		focus:     m.focus,
 		working:   m.phase == phaseWorking,
-		hasResult: m.phase == phaseDone && m.result != "",
+		hasResult: selOK && sel.url != "",
+		hasRows:   len(m.rows) > 0,
 	}
 	sections = append(sections, "\n"+m.help.View(hc))
 
@@ -120,11 +122,18 @@ func (m model) statusView(w int) string {
 		return "\n" + line
 
 	case phaseDone:
+		it, ok := m.selectedItem()
 		head := styGreen.Render("✓ done")
+		if ok && it.failed {
+			head = styRed.Render("✗ failed")
+		}
 		lines := []string{head}
-		if m.result != "" {
-			lines = append(lines, styText.Render(m.result))
-			lines = append(lines, styDim.Render("press o to open in your browser"))
+		if ok && it.url != "" {
+			lines = append(lines, styText.Render(it.url))
+			lines = append(lines, styDim.Render("o open · c copy url · s save"))
+		}
+		if m.notice != "" {
+			lines = append(lines, m.notice)
 		}
 		inner := lipgloss.JoinVertical(lipgloss.Left, lines...)
 		return "\n" + styEyebrow.Render("RESULT") + "\n" +
@@ -139,22 +148,14 @@ func (m model) statusView(w int) string {
 
 // Recent generations (most recent first, up to 5).
 func (m model) historyView() string {
-	if len(m.history) == 0 {
+	if len(m.rows) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString("\n" + styEyebrow.Render("RECENT") + "\n")
-	n := len(m.history)
-	for i := n - 1; i >= 0 && i >= n-5; i-- {
-		h := m.history[i]
-		dot := styGreen.Render("●")
-		if h.failed {
-			dot = styRed.Render("●")
-		}
-		b.WriteString(fmt.Sprintf("%s %s %s\n",
-			dot, styDim.Render("["+h.kind+"]"), styMuted.Render(truncate(h.prompt, 52))))
+	label := styEyebrow.Render("RECENT")
+	if m.focus == zoneOutput {
+		label = styAcc.Render("▸ ") + label
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return "\n" + label + "\n" + m.hist.View()
 }
 
 func fmtDur(d time.Duration) string {

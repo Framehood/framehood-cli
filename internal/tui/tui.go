@@ -6,7 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
+	"path"
 	"runtime"
 	"strings"
 	"time"
@@ -15,6 +20,7 @@ import (
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -60,6 +66,7 @@ type model struct {
 	input   textinput.Model
 	spin    spinner.Model
 	help    help.Model
+	hist    table.Model
 	keys    keyMap
 	focus   focusZone
 	kindIdx int
@@ -70,7 +77,9 @@ type model struct {
 	errMsg  string
 	jobID   string
 	started time.Time
-	history []historyItem
+	history []historyItem // chronological (append order)
+	rows    []historyItem // mirrors the table, newest-first; index by hist.Cursor()
+	notice  string        // transient action feedback ("copied", "saved → …")
 	width   int
 	height  int
 }
@@ -94,12 +103,97 @@ func Run(client *mcp.Client, email string) error {
 		input:    ti,
 		spin:     sp,
 		help:     help.New(),
+		hist:     newHistoryTable(),
 		keys:     defaultKeys(),
 		focus:    zoneInput, // start ready to type
 		balance:  "…",
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
+}
+
+// newHistoryTable builds the OUTPUT-pane history table. Rows are filled later
+// from the generation history (newest first).
+func newHistoryTable() table.Model {
+	t := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "", Width: 2},
+			{Title: "type", Width: 7},
+			{Title: "prompt", Width: 44},
+		}),
+		table.WithFocused(true),
+		table.WithHeight(6),
+	)
+	s := table.DefaultStyles()
+	s.Header = s.Header.Foreground(colDim).Bold(true).BorderBottom(false)
+	s.Cell = s.Cell.Foreground(colText)
+	s.Selected = s.Selected.Foreground(colInk).Background(colAccent).Bold(false)
+	t.SetStyles(s)
+	return t
+}
+
+// rebuildHistory refreshes the table rows (newest first) and the parallel
+// `rows` slice used to resolve the selection. selectNewest moves the cursor to
+// the newest row (job completion); otherwise the current selection is preserved
+// (e.g. a resize reflow must not yank the user off the row they were viewing).
+func (m *model) rebuildHistory(selectNewest bool) {
+	prev := m.hist.Cursor()
+	cols := tableWidth(m.width)
+	m.hist.SetColumns([]table.Column{
+		{Title: "", Width: 2},
+		{Title: "type", Width: 7},
+		{Title: "prompt", Width: cols},
+	})
+	rows := make([]table.Row, 0, len(m.history))
+	items := make([]historyItem, 0, len(m.history))
+	for i := len(m.history) - 1; i >= 0; i-- {
+		h := m.history[i]
+		dot := "●"
+		items = append(items, h)
+		rows = append(rows, table.Row{dot, h.kind, truncate(h.prompt, cols-1)})
+	}
+	m.rows = items
+	m.hist.SetRows(rows)
+	if len(rows) > 0 {
+		switch {
+		case selectNewest:
+			m.hist.SetCursor(0) // newest
+		case prev >= len(rows):
+			m.hist.SetCursor(len(rows) - 1)
+		case prev < 0:
+			m.hist.SetCursor(0)
+		default:
+			m.hist.SetCursor(prev)
+		}
+	}
+	h := len(rows)
+	if h > 6 {
+		h = 6
+	}
+	if h < 1 {
+		h = 1
+	}
+	m.hist.SetHeight(h + 1) // + header
+}
+
+func tableWidth(w int) int {
+	pw := w - 2 - 2 - 7 - 6 // margins + status + type cols + padding
+	if pw < 20 {
+		pw = 20
+	}
+	if pw > 60 {
+		pw = 60
+	}
+	return pw
+}
+
+// selectedItem returns the history row the OUTPUT cursor points at.
+func (m model) selectedItem() (historyItem, bool) {
+	i := m.hist.Cursor()
+	if i < 0 || i >= len(m.rows) {
+		return historyItem{}, false
+	}
+	return m.rows[i], true
 }
 
 func (m model) Init() tea.Cmd {
@@ -121,6 +215,10 @@ type polledMsg struct {
 	err error
 }
 type pollTickMsg struct{ jobID string }
+type savedMsg struct {
+	path string
+	err  error
+}
 
 // setFocus moves focus to z, keeping the textinput's Focus/Blur in sync so the
 // raw key stream only reaches the input when the input zone is active.
@@ -144,6 +242,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = msg.Width - 6
 		m.help.Width = msg.Width - 4
+		m.rebuildHistory(false) // reflow but keep the user's selected row
 
 	case tea.KeyMsg:
 		// Global keys (any zone). Only non-typed keys live here, so they never
@@ -189,6 +288,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pollTickMsg:
 		return m, pollCmd(m.client, msg.jobID)
 
+	case savedMsg:
+		if msg.err != nil {
+			m.notice = styRed.Render("save failed: " + msg.err.Error())
+		} else {
+			m.notice = styGreen.Render("saved → " + msg.path)
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -225,23 +332,47 @@ func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateOutput: the result/history is focused — action keys live here, and the
-// input is blurred, so 'o' finally opens the browser instead of typing "o".
+// updateOutput: the history table is focused — ↑↓ select a past generation and
+// o/c/s act on it. The input is blurred, so these are verbs, not typed text.
 func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit, m.keys.Esc):
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+	case key.Matches(msg, m.keys.Up, m.keys.Down):
+		m.notice = ""
+		m.hist, _ = m.hist.Update(msg) // let the table move its cursor
+		return m, nil
 	case key.Matches(msg, m.keys.Open):
-		if m.phase == phaseDone && m.result != "" {
-			_ = openBrowser(m.result)
+		if it, ok := m.selectedItem(); ok && it.url != "" {
+			if err := openBrowser(it.url); err != nil {
+				m.notice = styRed.Render("couldn't open: " + err.Error())
+			} else {
+				m.notice = styGreen.Render("opened in browser")
+			}
 		}
+		return m, nil
+	case key.Matches(msg, m.keys.Copy):
+		if it, ok := m.selectedItem(); ok && it.url != "" {
+			if err := copyToClipboard(it.url); err != nil {
+				m.notice = styRed.Render("copy failed: " + err.Error())
+			} else {
+				m.notice = styGreen.Render("copied url to clipboard")
+			}
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Save):
+		if it, ok := m.selectedItem(); ok && it.url != "" {
+			m.notice = styDim.Render("saving…")
+			return m, saveCmd(it.url)
+		}
+		return m, nil
 	case key.Matches(msg, m.keys.New): // enter
-		// Start a fresh prompt.
 		if m.phase != phaseWorking {
 			m.phase = phaseIdle
-			m.result, m.errMsg, m.jobID = "", "", ""
+			m.result, m.errMsg, m.jobID, m.notice = "", "", "", ""
 			m.input.SetValue("")
 			return m.setFocus(zoneInput), nil
 		}
@@ -299,12 +430,15 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
 		m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), failed: true})
+		m.rebuildHistory(true)
 		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
+	m.notice = ""
 	m.history = append(m.history, historyItem{kind: kinds[m.kindIdx], prompt: m.input.Value(), url: m.result})
-	// Auto-focus the output so 'o' opens the result immediately.
+	m.rebuildHistory(true)
+	// Auto-focus the output so o/c/s act on the just-finished (newest) row.
 	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 }
 
@@ -373,4 +507,104 @@ func openBrowser(target string) error {
 	default:
 		return exec.Command("xdg-open", target).Start()
 	}
+}
+
+// copyToClipboard writes s to the OS clipboard via the platform tool (no extra
+// dependency). On Linux this needs xclip or xsel installed.
+func copyToClipboard(s string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "windows":
+		cmd = exec.Command("clip")
+	default:
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else if _, err := exec.LookPath("xsel"); err == nil {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		} else {
+			return fmt.Errorf("no clipboard tool (install xclip or xsel)")
+		}
+	}
+	cmd.Stdin = strings.NewReader(s)
+	return cmd.Run()
+}
+
+// saveCmd downloads the result URL into the current directory, off the UI thread.
+func saveCmd(rawURL string) tea.Cmd {
+	return func() tea.Msg {
+		path, err := saveResult(rawURL)
+		return savedMsg{path: path, err: err}
+	}
+}
+
+// outputFilename derives a local filename from a result URL — the path's base,
+// with query/fragment dropped — falling back to a generic name.
+func outputFilename(rawURL string) string {
+	name := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		name = path.Base(u.Path)
+	}
+	if name == "" || name == "." || name == "/" || name == ".." {
+		return "framehood_output"
+	}
+	return name
+}
+
+// saveResult downloads rawURL to a non-colliding path in the current directory,
+// returning the written path. It never overwrites an existing file.
+func saveResult(rawURL string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("http %d", resp.StatusCode)
+	}
+
+	// Create exclusively, picking the next free "name", "name-1", … so repeated
+	// saves never clobber an earlier file.
+	f, name, err := createNonColliding(outputFilename(rawURL))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(name)
+		return "", err
+	}
+	if err := f.Close(); err != nil { // surface the final flush error
+		os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+// createNonColliding O_EXCL-creates the first free of base, base-1, base-2, …
+// in the current directory, returning the open file and its name.
+func createNonColliding(base string) (*os.File, string, error) {
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 0; i < 1000; i++ {
+		name := base
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d%s", stem, i, ext)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("could not find a free filename for %q", base)
 }
