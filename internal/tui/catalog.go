@@ -58,7 +58,6 @@ var catalog = []toolGroup{
 		{"video", "assemble", "assemble clips", kindGenerate, "", "video.mp4", []string{"clips"}},
 		{"video", "mix_audio", "mix in audio tracks", kindGenerate, "", "video.mp4", []string{"video_url", "tracks"}},
 		{"video", "scene", "actor scene (image→animate→speak→mix)", kindGenerate, "", "video.mp4", []string{"actor_id", "scene_prompt"}},
-		{"video", "reframe", "re-aspect for shorts/reels", kindGenerate, "", "video.mp4", []string{"video_url"}},
 	}},
 	{"audio", "Audio", []actionSpec{
 		{"audio", "speak", "text → speech", kindGenerate, "text", "audio.mp3", []string{"text"}},
@@ -153,7 +152,6 @@ var actionForms = map[string][]paramSpec{
 	"video.lipsync":   {req("video_url", "face video", pMedia), req("audio_url", "voice audio", pMedia)},
 	"video.captions":  {req("video_url", "source video", pMedia)},
 	"video.upscale":   {req("video_url", "source video", pMedia)},
-	"video.reframe":   {req("video_url", "source video", pMedia)},
 	"video.mix_audio": {req("video_url", "source video", pMedia), req("tracks", "audio tracks (comma-sep)", pMediaList)},
 	"video.assemble":  {req("clips", "clips (comma-sep urls)", pMediaList)},
 	"audio.mix":       {req("tracks", "tracks (comma-sep urls)", pMediaList)},
