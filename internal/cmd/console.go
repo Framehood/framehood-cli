@@ -118,11 +118,12 @@ func newTeamCmd(cfg config.Config) *cobra.Command {
 	trend := &cobra.Command{
 		Use: "trend", Short: "Daily org credit spend",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			a := map[string]any{"action": "trend"}
-			if days > 0 {
-				a["days"] = days
+			if days < 7 {
+				days = 7
+			} else if days > 90 {
+				days = 90
 			}
-			return callTool(cmd, cfg, "org", a)
+			return callTool(cmd, cfg, "org", map[string]any{"action": "trend", "days": days})
 		},
 	}
 	trend.Flags().IntVar(&days, "days", 30, "Window in days (7–90)")
