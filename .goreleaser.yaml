@@ -36,6 +36,10 @@ checksum:
 
 brews:
   - name: framehood
+    # Write to Formula/ — Homebrew uses that path when present, so without this
+    # goreleaser dropped framehood.rb at the tap root and brew kept serving the old
+    # Formula/framehood.rb.
+    directory: Formula
     repository:
       owner: Framehood
       name: homebrew-tap
