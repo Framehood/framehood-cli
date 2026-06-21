@@ -779,10 +779,11 @@ func formatBalance(raw json.RawMessage) string {
 }
 
 func openBrowser(target string) error {
-	// Only open real web URLs — a server-supplied file:// or javascript: result URL
-	// must never reach open / rundll32 / xdg-open.
-	if u, err := url.Parse(target); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("refusing to open a non-web URL")
+	// Only open our own https result URLs — never a server-supplied file://,
+	// javascript:, or off-CDN (phishing) URL reaches open / rundll32 / xdg-open.
+	// (The login flow uses auth.OpenBrowser, not this one, so it's unaffected.)
+	if u, err := url.Parse(target); err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
+		return fmt.Errorf("refusing to open a non-Framehood URL")
 	}
 	switch runtime.GOOS {
 	case "darwin":
