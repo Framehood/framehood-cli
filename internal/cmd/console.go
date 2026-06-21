@@ -101,6 +101,16 @@ func newProjectCmd(cfg config.Config) *cobra.Command {
 			}
 			return callTool(cmd, cfg, "project", a)
 		}},
+		&cobra.Command{Use: "use [project-id]", Short: "Set your active/default project — new generations land there (omit the id to clear)", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+			a := map[string]any{"action": "use"}
+			if len(args) > 0 {
+				a["id"] = args[0]
+			}
+			return callTool(cmd, cfg, "project", a)
+		}},
+		&cobra.Command{Use: "current", Short: "Show your active/default project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+			return callTool(cmd, cfg, "project", map[string]any{"action": "current"})
+		}},
 	)
 	return cmd
 }
