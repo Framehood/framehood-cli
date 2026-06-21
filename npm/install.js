@@ -61,13 +61,28 @@ function download(u, dest, redirects = 0) {
   });
 }
 
+// sha256File streams the archive through the hash so we never load the whole
+// binary into memory (a hostile/oversized response can't OOM the postinstall).
+function sha256File(p) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash("sha256");
+    fs.createReadStream(p)
+      .on("error", reject)
+      .on("data", (d) => h.update(d))
+      .on("end", () => resolve(h.digest("hex")));
+  });
+}
+
 (async () => {
   try {
     console.log(`framehood: downloading ${asset} …`);
     await download(url, archivePath);
 
     // Verify the download against the release's checksums.txt before we unpack
-    // and run it — a tampered/MITM'd binary fails the sha256 match.
+    // and run it — catches MITM, partial tampering, and corrupt downloads. NOTE:
+    // checksums.txt rides the same release channel, so a full GitHub-release
+    // compromise is out of scope here; signature verification (cosign) is the
+    // proper follow-up for that threat.
     const checksumUrl = `https://github.com/Framehood/framehood-cli/releases/download/v${version}/checksums.txt`;
     const checksumPath = path.join(os.tmpdir(), `framehood_checksums_${version}.txt`);
     await download(checksumUrl, checksumPath);
@@ -75,7 +90,7 @@ function download(u, dest, redirects = 0) {
     const expected = line ? line.trim().split(/\s+/)[0].toLowerCase() : null;
     fs.unlinkSync(checksumPath);
     if (!expected) throw new Error(`no checksum for ${asset} in checksums.txt`);
-    const actual = crypto.createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+    const actual = await sha256File(archivePath);
     if (actual !== expected) throw new Error(`checksum mismatch for ${asset} (expected ${expected}, got ${actual})`);
     console.log("framehood: checksum verified ✓");
 

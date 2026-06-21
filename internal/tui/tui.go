@@ -831,9 +831,11 @@ func outputFilename(rawURL string) string {
 	if u, err := url.Parse(rawURL); err == nil {
 		name = path.Base(u.Path)
 	}
-	// Reject empties, traversal, and dotfiles — a server-controlled URL ending in
-	// /.env, /.npmrc, /.bashrc must not land a hidden file in the cwd.
-	if name == "" || name == "." || name == "/" || name == ".." || strings.HasPrefix(name, ".") {
+	// Reject empties, traversal, dotfiles, and any separator/drive/ADS marker
+	// (\ / :) — a server-controlled URL ending in /.env or carrying C:\ / ..\ must
+	// not escape the cwd or land a hidden file (backslash/colon matter on Windows).
+	if name == "" || name == "." || name == "/" || name == ".." ||
+		strings.HasPrefix(name, ".") || strings.ContainsAny(name, `\/:`) {
 		return "framehood_output"
 	}
 	return name
@@ -881,10 +883,18 @@ func saveResult(rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxResultDownloadBytes)); err != nil {
+	// Read one byte past the cap so an oversized response fails loudly instead of
+	// silently saving a truncated, corrupt file.
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxResultDownloadBytes+1))
+	if err != nil {
 		f.Close()
 		os.Remove(name)
 		return "", err
+	}
+	if n > maxResultDownloadBytes {
+		f.Close()
+		os.Remove(name)
+		return "", fmt.Errorf("result exceeds %d bytes", maxResultDownloadBytes)
 	}
 	if err := f.Close(); err != nil { // surface the final flush error
 		os.Remove(name)
