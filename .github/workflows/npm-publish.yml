@@ -1,0 +1,38 @@
+name: npm-publish
+
+# Deliberate, manual npm publish — decoupled from the tag release so pushing a tag
+# never auto-publishes to the registry. Run this only AFTER the matching GitHub
+# release vX.Y.Z exists: the npm wrapper's postinstall downloads that release's
+# binary and verifies it against the release checksums.txt.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.2.1 (must match an existing GitHub release vX.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: false
+      - name: Publish npm wrapper
+        working-directory: npm
+        env:
+          # Passed via env (not inlined into the script) to avoid expression injection.
+          VERSION: ${{ inputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
+          npm publish --access public
