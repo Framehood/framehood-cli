@@ -40,6 +40,9 @@ func Execute() error {
 		newWhoamiCmd(cfg),
 		newGenerateCmd(cfg),
 		newBalanceCmd(cfg),
+		newLibraryCmd(cfg),
+		newProjectCmd(cfg),
+		newTeamCmd(cfg),
 	)
 	return root.Execute()
 }
