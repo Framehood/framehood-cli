@@ -12,10 +12,28 @@ func TestOutputFilename(t *testing.T) {
 		"https://x/y/voice.mp3#frag":                           "voice.mp3",
 		"https://host/":                                        "framehood_output",
 		"":                                                     "framehood_output",
+		// Server-controlled names that must never reach the cwd:
+		"https://cdn.framehood.ai/results/.env":    "framehood_output", // dotfile
+		"https://cdn.framehood.ai/.npmrc":          "framehood_output", // dotfile
+		"https://cdn.framehood.ai/a/C:windows.exe": "framehood_output", // drive/ADS colon
+		"https://cdn.framehood.ai/a%5cb.exe":       "framehood_output", // %5c → backslash
 	}
 	for in, want := range cases {
 		if got := outputFilename(in); got != want {
 			t.Errorf("outputFilename(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResultHostAllowed(t *testing.T) {
+	for _, h := range []string{"framehood.ai", "cdn.framehood.ai", "CDN.Framehood.AI", "cdn.framehood.ai:443"} {
+		if !resultHostAllowed(h) {
+			t.Errorf("resultHostAllowed(%q) = false, want true", h)
+		}
+	}
+	for _, h := range []string{"evil.com", "framehood.ai.evil.com", "169.254.169.254", "notframehood.ai", ""} {
+		if resultHostAllowed(h) {
+			t.Errorf("resultHostAllowed(%q) = true, want false", h)
 		}
 	}
 }

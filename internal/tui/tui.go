@@ -779,6 +779,12 @@ func formatBalance(raw json.RawMessage) string {
 }
 
 func openBrowser(target string) error {
+	// Only open our own https result URLs — never a server-supplied file://,
+	// javascript:, or off-CDN (phishing) URL reaches open / rundll32 / xdg-open.
+	// (The login flow uses auth.OpenBrowser, not this one, so it's unaffected.)
+	if u, err := url.Parse(target); err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
+		return fmt.Errorf("refusing to open a non-Framehood URL")
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", target).Start()
@@ -826,15 +832,37 @@ func outputFilename(rawURL string) string {
 	if u, err := url.Parse(rawURL); err == nil {
 		name = path.Base(u.Path)
 	}
-	if name == "" || name == "." || name == "/" || name == ".." {
+	// Reject empties, traversal, dotfiles, and any separator/drive/ADS marker
+	// (\ / :) — a server-controlled URL ending in /.env or carrying C:\ / ..\ must
+	// not escape the cwd or land a hidden file (backslash/colon matter on Windows).
+	if name == "" || name == "." || name == "/" || name == ".." ||
+		strings.HasPrefix(name, ".") || strings.ContainsAny(name, `\/:`) {
 		return "framehood_output"
 	}
 	return name
 }
 
+// maxResultDownloadBytes caps one saved result so a rogue server can't fill the disk.
+const maxResultDownloadBytes = 1 << 30 // 1 GiB
+
+// resultHostAllowed restricts result fetches/opens to our CDN — outputs are always
+// rehosted to *.framehood.ai, so this closes SSRF (e.g. 169.254.169.254) and any
+// non-CDN target a compromised server might return.
+func resultHostAllowed(host string) bool {
+	host = strings.ToLower(host)
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	return host == "framehood.ai" || strings.HasSuffix(host, ".framehood.ai")
+}
+
 // saveResult downloads rawURL to a non-colliding path in the current directory,
 // returning the written path. It never overwrites an existing file.
 func saveResult(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
+		return "", fmt.Errorf("refusing to fetch a non-Framehood result URL")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -856,10 +884,18 @@ func saveResult(rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// Read one byte past the cap so an oversized response fails loudly instead of
+	// silently saving a truncated, corrupt file.
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxResultDownloadBytes+1))
+	if err != nil {
 		f.Close()
 		os.Remove(name)
 		return "", err
+	}
+	if n > maxResultDownloadBytes {
+		f.Close()
+		os.Remove(name)
+		return "", fmt.Errorf("result exceeds %d bytes", maxResultDownloadBytes)
 	}
 	if err := f.Close(); err != nil { // surface the final flush error
 		os.Remove(name)
