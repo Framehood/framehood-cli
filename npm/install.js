@@ -5,6 +5,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const https = require("https");
+const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 
 const { version } = require("./package.json");
@@ -64,6 +65,20 @@ function download(u, dest, redirects = 0) {
   try {
     console.log(`framehood: downloading ${asset} …`);
     await download(url, archivePath);
+
+    // Verify the download against the release's checksums.txt before we unpack
+    // and run it — a tampered/MITM'd binary fails the sha256 match.
+    const checksumUrl = `https://github.com/Framehood/framehood-cli/releases/download/v${version}/checksums.txt`;
+    const checksumPath = path.join(os.tmpdir(), `framehood_checksums_${version}.txt`);
+    await download(checksumUrl, checksumPath);
+    const line = fs.readFileSync(checksumPath, "utf8").split("\n").find((l) => l.trim().endsWith(asset));
+    const expected = line ? line.trim().split(/\s+/)[0].toLowerCase() : null;
+    fs.unlinkSync(checksumPath);
+    if (!expected) throw new Error(`no checksum for ${asset} in checksums.txt`);
+    const actual = crypto.createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+    if (actual !== expected) throw new Error(`checksum mismatch for ${asset} (expected ${expected}, got ${actual})`);
+    console.log("framehood: checksum verified ✓");
+
     // Both tar.gz and zip are handled by the bsdtar shipped on macOS, Linux,
     // and Windows 10+.
     execFileSync("tar", ["-xf", archivePath, "-C", binDir], { stdio: "inherit" });

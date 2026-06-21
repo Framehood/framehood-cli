@@ -779,6 +779,11 @@ func formatBalance(raw json.RawMessage) string {
 }
 
 func openBrowser(target string) error {
+	// Only open real web URLs — a server-supplied file:// or javascript: result URL
+	// must never reach open / rundll32 / xdg-open.
+	if u, err := url.Parse(target); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("refusing to open a non-web URL")
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", target).Start()
@@ -826,15 +831,35 @@ func outputFilename(rawURL string) string {
 	if u, err := url.Parse(rawURL); err == nil {
 		name = path.Base(u.Path)
 	}
-	if name == "" || name == "." || name == "/" || name == ".." {
+	// Reject empties, traversal, and dotfiles — a server-controlled URL ending in
+	// /.env, /.npmrc, /.bashrc must not land a hidden file in the cwd.
+	if name == "" || name == "." || name == "/" || name == ".." || strings.HasPrefix(name, ".") {
 		return "framehood_output"
 	}
 	return name
 }
 
+// maxResultDownloadBytes caps one saved result so a rogue server can't fill the disk.
+const maxResultDownloadBytes = 1 << 30 // 1 GiB
+
+// resultHostAllowed restricts result fetches/opens to our CDN — outputs are always
+// rehosted to *.framehood.ai, so this closes SSRF (e.g. 169.254.169.254) and any
+// non-CDN target a compromised server might return.
+func resultHostAllowed(host string) bool {
+	host = strings.ToLower(host)
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	return host == "framehood.ai" || strings.HasSuffix(host, ".framehood.ai")
+}
+
 // saveResult downloads rawURL to a non-colliding path in the current directory,
 // returning the written path. It never overwrites an existing file.
 func saveResult(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
+		return "", fmt.Errorf("refusing to fetch a non-Framehood result URL")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -856,7 +881,7 @@ func saveResult(rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxResultDownloadBytes)); err != nil {
 		f.Close()
 		os.Remove(name)
 		return "", err
