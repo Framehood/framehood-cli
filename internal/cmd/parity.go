@@ -401,13 +401,21 @@ func runWorkflowsList(cmd *cobra.Command, cfg config.Config) error {
 		Description string `json:"description"`
 	}
 	out := make([]wf, 0, len(knownWorkflows))
+	var lastErr error
 	for _, name := range knownWorkflows {
 		raw, err := client.ReadResource(cmd.Context(), "zvs://workflow/"+pathSeg(name))
 		if err != nil {
-			// A missing/renamed workflow must not abort the whole listing; skip it.
+			// A single missing/renamed workflow must not abort the whole listing —
+			// remember the error and keep going so partial results still render.
+			lastErr = err
 			continue
 		}
 		out = append(out, wf{Name: name, Description: workflowSummary(raw)})
+	}
+	// If every read failed (expired auth, server down, network), surface the
+	// error instead of printing an empty catalog that masquerades as success.
+	if len(out) == 0 && lastErr != nil {
+		return lastErr
 	}
 	encoded, err := json.Marshal(out)
 	if err != nil {
