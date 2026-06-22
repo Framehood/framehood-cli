@@ -130,6 +130,51 @@ func TestPaletteViewNoPanic(t *testing.T) {
 	t.Logf("=== Palette render at 100×30, query='image' ===\n%s\n", pv)
 }
 
+// TestPaletteViewSmallWidth is the small-width render smoke test: it renders the
+// palette grid at narrow widths (including below one cell) with an EMPTY query
+// and with a no-match query, and confirms View() never panics and always
+// produces non-empty output. Guards the columns math (cols clamps to ≥1).
+func TestPaletteViewSmallWidth(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+
+	for _, w := range []int{0, 1, 5, 20, paletteCellTotal - 1} {
+		// Empty query → all commands visible, must lay out at ≥1 column.
+		p := openPaletteState() // query == ""
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("palette.View(width=%d, empty query) panicked: %v", w, r)
+				}
+			}()
+			out := p.View(w)
+			if out == "" {
+				t.Fatalf("palette.View(width=%d, empty query) returned empty", w)
+			}
+			if p.cols < 1 {
+				t.Errorf("width=%d: cols = %d, want ≥1", w, p.cols)
+			}
+			if w == 20 {
+				t.Logf("=== Palette render at width=20, empty query (cols=%d) ===\n%s\n", p.cols, out)
+			}
+		}()
+
+		// No-match query → the empty-state branch must also not panic.
+		p2 := openPaletteState()
+		p2.query = "zzznomatch"
+		p2.refilter()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("palette.View(width=%d, no matches) panicked: %v", w, r)
+				}
+			}()
+			if out := p2.View(w); out == "" {
+				t.Fatalf("palette.View(width=%d, no matches) returned empty", w)
+			}
+		}()
+	}
+}
+
 // TestPaletteOpenClose verifies that pressing Esc via updatePalette clears
 // the palette and restores input focus.
 func TestPaletteOpenClose(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Framehood/framehood-cli/internal/mcp"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // stubAuth is a test Authenticator that records calls and returns canned data.
@@ -90,6 +91,61 @@ func TestRunLogout_ClearsSession(t *testing.T) {
 	}
 	if got.notice == "" {
 		t.Error("after logout: a notice should be shown")
+	}
+}
+
+// TestRunLogout_ModelSurvivesKeypress verifies that after a real logout (which
+// nil-resets m.client) the model handles a subsequent keypress without a nil
+// panic. The Enter path on a runnable work action must short-circuit on the
+// signed-out guard and never dereference the now-nil client. An immediate
+// palette action (billing·balance) routed while signed out must do the same.
+func TestRunLogout_ModelSurvivesKeypress(t *testing.T) {
+	auth := &stubAuth{}
+	m := newTestModel()
+	m.auth = auth
+	m.loggedIn = true
+	m.client = mcp.New("https://example/mcp", nil)
+
+	// Log out: this sets m.client = nil and m.loggedIn = false.
+	nm, _ := m.runLogout()
+	got := nm.(model)
+	if got.client != nil || got.loggedIn {
+		t.Fatalf("precondition: logout should clear client+loggedIn (client=%v loggedIn=%v)",
+			got.client, got.loggedIn)
+	}
+
+	// Pressing Enter on the active (runnable) work action must NOT panic and must
+	// NOT start a job — it should surface the signed-out error instead.
+	got.action = findAction(t, "image", "create")
+	got.input.SetValue("a red fox")
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("keypress after logout panicked: %v", r)
+		}
+	}()
+	after, _ := got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	am := after.(model)
+	if am.phase == phaseWorking {
+		t.Error("a signed-out model must not start a job on Enter")
+	}
+	if am.errMsg == "" {
+		t.Error("Enter while signed out should set the not-signed-in error")
+	}
+
+	// Route an immediate palette action while signed out: also guarded, no panic.
+	for _, c := range allPaletteCmds {
+		if c.id == "billing·balance" {
+			cc := c
+			nm2, _ := got.runPaletteCmd(&cc)
+			im := nm2.(model)
+			if im.phase == phaseWorking {
+				t.Error("immediate action while signed out must not start a job")
+			}
+			if im.errMsg == "" {
+				t.Error("immediate action while signed out should set the not-signed-in error")
+			}
+			break
+		}
 	}
 }
 
