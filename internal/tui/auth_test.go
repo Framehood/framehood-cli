@@ -94,6 +94,56 @@ func TestRunLogout_ClearsSession(t *testing.T) {
 	}
 }
 
+// TestPollTickAfterLogout_NoNilDeref reproduces the round-3 crash: a job is in
+// flight (phaseWorking + a jobID), the user runs /logout (which nil-resets the
+// client and tears down the working state), and a previously-scheduled poll
+// tick is then delivered. It must not panic and must not issue a poll command
+// against the now-nil client.
+func TestPollTickAfterLogout_NoNilDeref(t *testing.T) {
+	auth := &stubAuth{}
+	m := newTestModel()
+	m.auth = auth
+	m.loggedIn = true
+	m.client = mcp.New("https://example/mcp", nil)
+
+	// Simulate an in-flight job.
+	m.phase = phaseWorking
+	m.jobID = "job_inflight"
+	m.status = "working"
+
+	// Log out while the job is still "polling".
+	nm, _ := m.runLogout()
+	got := nm.(model)
+	if got.client != nil {
+		t.Fatal("precondition: logout must nil the client")
+	}
+	if got.phase == phaseWorking || got.jobID != "" {
+		t.Fatalf("logout must clear working state: phase=%v jobID=%q", got.phase, got.jobID)
+	}
+
+	// Deliver the stale poll tick. Must not panic, must not return a command.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("pollTickMsg after logout panicked: %v", r)
+		}
+	}()
+	after, cmd := got.Update(pollTickMsg{jobID: "job_inflight"})
+	if _, ok := after.(model); !ok {
+		t.Fatal("Update did not return a model")
+	}
+	if cmd != nil {
+		t.Error("a stale poll tick after logout must not issue a command")
+	}
+
+	// Belt-and-suspenders: the command builders themselves are nil-safe.
+	if pollCmd(nil, "job_x") != nil {
+		t.Error("pollCmd(nil, …) should be a no-op (nil cmd)")
+	}
+	if loadBalanceCmd(nil) != nil {
+		t.Error("loadBalanceCmd(nil) should be a no-op (nil cmd)")
+	}
+}
+
 // TestRunLogout_ModelSurvivesKeypress verifies that after a real logout (which
 // nil-resets m.client) the model handles a subsequent keypress without a nil
 // panic. The Enter path on a runnable work action must short-circuit on the

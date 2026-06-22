@@ -44,25 +44,32 @@ func loginCmd(a Authenticator) tea.Cmd {
 }
 
 // handleLoginResult swaps in the freshly-authenticated client on success and
-// reloads the balance; on failure it surfaces the error as a notice.
+// reloads the balance; on failure it surfaces the error as a notice and leaves
+// the existing (signed-in or signed-out) state untouched.
 func (m model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.notice = styRed.Render("login failed: " + msg.err.Error())
 		return m, nil
 	}
+	if msg.client == nil {
+		// Defensive: a nil client on the success path is not a usable session.
+		m.notice = styRed.Render("login failed: no session returned")
+		return m, nil
+	}
+
+	// Success: adopt the new session. These assignments are intentionally
+	// confined to this branch so a future partial-success can't leave the model
+	// claiming it's signed in without a client.
 	m.client = msg.client
 	m.email = msg.email
-	m.loggedIn = msg.client != nil
+	m.loggedIn = true
 	m.balance = "…"
 	who := m.email
 	if who == "" {
 		who = "your account"
 	}
 	m.notice = styGreen.Render("signed in as " + who)
-	if m.loggedIn {
-		return m, loadBalanceCmd(m.client)
-	}
-	return m, nil
+	return m, loadBalanceCmd(m.client)
 }
 
 // runLogout handles the `/logout` palette command: it clears stored
@@ -81,6 +88,13 @@ func (m model) runLogout() (tea.Model, tea.Cmd) {
 	m.email = ""
 	m.loggedIn = false
 	m.balance = "—"
+	// Tear down any in-flight job state so a scheduled poll tick (which would
+	// otherwise fire against the now-nil client) becomes a harmless no-op.
+	m.phase = phaseIdle
+	m.jobID = ""
+	m.status = ""
+	m.result = ""
+	m.errMsg = ""
 	m.notice = styGreen.Render("signed out · /login to sign back in")
 	return m.setFocus(zoneInput), nil
 }

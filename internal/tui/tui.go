@@ -145,6 +145,12 @@ type model struct {
 // Run starts the interactive studio. auth wires the `/login` and `/logout`
 // palette commands; it may be nil (those commands then report unavailable).
 func Run(client *mcp.Client, email string, auth Authenticator) error {
+	// The work-action ring is built from the catalog; an empty ring would mean
+	// a broken/empty catalog. Fail clearly rather than index workActions[0].
+	if len(workActions) == 0 {
+		return fmt.Errorf("studio: no work actions available (empty catalog)")
+	}
+
 	ti := textinput.New()
 	ti.Placeholder = composerPlaceholder
 	ti.Focus()
@@ -369,6 +375,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleJob(msg.job)
 
 	case pollTickMsg:
+		// A logout (or any client teardown) may have nil-ed the client while a
+		// poll tick was already scheduled — drop the stale tick instead of
+		// dereferencing a nil client.
+		if m.client == nil {
+			return m, nil
+		}
 		return m, pollCmd(m.client, msg.jobID)
 
 	case savedMsg:
@@ -594,9 +606,22 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // startForm enters per-parameter form mode for a form-driven action, reusing
 // the prompt box as a sequential field editor.
+//
+// Some ring actions are neither prompt-runnable nor form-backed yet
+// (e.g. video·scene, actor·create). For those, spec.form() is empty: entering
+// form mode would index an empty slice and panic. Instead we fail safe —
+// set the action, show a "not yet available" notice listing its required
+// inputs, and stay on the input with no form open.
 func (m model) startForm(spec actionSpec) model {
 	m.action = spec
-	m.formFields = spec.form()
+	fields := spec.form()
+	if len(fields) == 0 {
+		m.formFields = nil
+		m.input.Placeholder = composerPlaceholder
+		m.notice = styRed.Render(specUnavailableNotice(spec))
+		return m.setFocus(zoneInput)
+	}
+	m.formFields = fields
 	m.formIdx = 0
 	m.formVals = map[string]string{}
 	// Chaining: drop a carried-over result URL into the first media field.
@@ -838,6 +863,17 @@ func (m model) actionNeeds() string {
 	return "input"
 }
 
+// specUnavailableNotice is the message shown when a ring action has no prompt
+// path and no form yet (form wiring for it is a deliberate follow-up). It names
+// the action and its required inputs so the user knows what it will need.
+func specUnavailableNotice(spec actionSpec) string {
+	label := spec.tool + " " + spec.action
+	if len(spec.needs) > 0 {
+		return label + " needs: " + strings.Join(spec.needs, ", ") + " — not yet available in the studio"
+	}
+	return label + " — not yet available in the studio"
+}
+
 // handleJob advances the state machine from a freshly observed job.
 func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 	m.jobID = j.ID
@@ -876,6 +912,9 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 // --- commands ---
 
 func loadBalanceCmd(c *mcp.Client) tea.Cmd {
+	if c == nil {
+		return nil // signed out — nothing to load, no-op
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -897,6 +936,9 @@ func submitCmd(c *mcp.Client, tool string, args map[string]any) tea.Cmd {
 }
 
 func pollCmd(c *mcp.Client, jobID string) tea.Cmd {
+	if c == nil {
+		return nil // signed out — drop the poll, no-op
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

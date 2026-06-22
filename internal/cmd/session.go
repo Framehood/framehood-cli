@@ -74,11 +74,11 @@ func (a studioAuth) Login(ctx context.Context) (*mcp.Client, string, error) {
 	if err := auth.Save(a.cfg.CredentialsPath(), creds); err != nil {
 		return nil, "", err
 	}
-	sess, err := NewSession(a.cfg)
-	if err != nil {
-		return nil, "", err
-	}
-	return sess.Client(), sess.Email(), nil
+	// Build the session straight from the just-obtained creds rather than
+	// re-loading from disk: a transient load failure must not report
+	// "login failed" when the credentials were in fact saved successfully.
+	s := &Session{cfg: a.cfg, creds: creds}
+	return s.Client(), s.Email(), nil
 }
 
 // Logout clears the stored credentials — the same path as newLogoutCmd.
