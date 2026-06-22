@@ -146,7 +146,7 @@ func (m model) statusView(w int) string {
 				hdr = strings.ToUpper(m.readHdr)
 			}
 			inner := lipgloss.JoinVertical(lipgloss.Left,
-				styGreen.Render("✓ "+m.readHdr),
+				styGreen.Render("✓ "+hdr),
 				styText.Render(truncateBlock(m.readData, w-8, 18)),
 				styDim.Render("enter = clear · / = new command"))
 			return "\n" + styEyebrow.Render(hdr) + "\n" +

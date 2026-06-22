@@ -25,8 +25,19 @@ func (f *fakeTokens) Refresh(context.Context) (string, error) { return f.tok, ni
 // text, generation tools return a job envelope — both as the same shape.
 func toolCallServer(t *testing.T, innerText string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Validate the request contract — these read actions must go out as
+		// tools/call, so a routing regression that sends a different method
+		// (or none) fails the call instead of silently passing.
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
+		if req.Method != "tools/call" {
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unexpected method %q"}}`, req.Method)
+			return
+		}
 		// JSON-encode innerText so it is a valid JSON string in the "text" field.
 		b, _ := json.Marshal(innerText)
 		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%s}],"isError":false}}`, string(b))
