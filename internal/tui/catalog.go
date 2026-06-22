@@ -170,6 +170,7 @@ const (
 	pTextList                   // comma-separated free-text values → []string (e.g. prompts)
 	pNumber                     // an optional integer (omitted when empty / non-numeric)
 	pJSON                       // a JSON object (a non-JSON value is wrapped as {"text": …})
+	pBool                       // a boolean — true/yes/1/y/on → true, false/no/0/n/off → false
 )
 
 type paramSpec struct {
@@ -234,6 +235,7 @@ var actionForms = map[string][]paramSpec{
 	"project.update":    {req("id", "project id", pText), opt("name", "new name (optional)", pText), opt("visibility", "visibility: personal | shared", pText), opt("description", "new description (optional)", pText)},
 	"billing.preview":   {req("step", "package id (from billing plans)", pText)},
 	"billing.change":    {req("step", "package id (from billing plans)", pText)},
+	"billing.cancel":    {opt("reactivate", "reactivate? true to resume, blank to cancel at period end", pBool)},
 	"files.unpublish":   {req("filename", "file key to make private", pText)},
 	"files.download":    {req("filename", "file key to fetch", pText)},
 	"org.accept_invite": {req("token", "invite token", pText)},
@@ -267,6 +269,13 @@ func argsForForm(spec actionSpec, vals map[string]string) (string, map[string]an
 			}
 		case pJSON:
 			args[f.name] = parseJSONField(v)
+		case pBool:
+			// The MCP tool expects a real boolean, not the string "true". Only
+			// forward an unambiguous value; an unrecognized one is dropped so the
+			// action falls back to its server-side default.
+			if b, ok := parseBoolField(v); ok {
+				args[f.name] = b
+			}
 		default:
 			args[f.name] = v
 		}
@@ -298,4 +307,16 @@ func parseJSONField(v string) any {
 		return obj
 	}
 	return map[string]any{"text": v}
+}
+
+// parseBoolField parses a form value into a boolean. ok=false for an
+// unrecognized value so the caller can drop the field (server default applies).
+func parseBoolField(v string) (val, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "yes", "y", "1", "on":
+		return true, true
+	case "false", "no", "n", "0", "off":
+		return false, true
+	}
+	return false, false
 }

@@ -110,6 +110,9 @@ func newProjectCmd(cfg config.Config) *cobra.Command {
 				a["name"] = upName
 			}
 			if cmd.Flags().Changed("visibility") {
+				if upVis != "personal" && upVis != "shared" {
+					return fmt.Errorf("--visibility must be \"personal\" or \"shared\" (got %q)", upVis)
+				}
 				a["visibility"] = upVis
 			}
 			if cmd.Flags().Changed("description") {

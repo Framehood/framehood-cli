@@ -177,6 +177,73 @@ func TestReadFormActions_RouteThroughImmediate(t *testing.T) {
 	}
 }
 
+// TestBillingCancelForm_ReactivateBool verifies billing·cancel opens a form and
+// sends `reactivate` as a real boolean (not the string "true"), in both
+// directions, and omits it for a blank / unrecognized value.
+func TestBillingCancelForm_ReactivateBool(t *testing.T) {
+	spec := findAction(t, "billing", "cancel")
+	if !spec.hasForm() {
+		t.Fatalf("billing·cancel should have a form so the studio can express reactivate")
+	}
+	cases := []struct {
+		name     string
+		val      string
+		wantKey  bool // whether reactivate is present in args
+		wantBool bool
+	}{
+		{"true word", "true", true, true},
+		{"yes", "yes", true, true},
+		{"1", "1", true, true},
+		{"false word", "false", true, false},
+		{"no", "no", true, false},
+		{"blank → cancel at period end", "", false, false},
+		{"unrecognized dropped", "maybe", false, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			tool, args := argsForForm(spec, map[string]string{"reactivate": c.val})
+			if tool != "billing" || args["action"] != "cancel" {
+				t.Fatalf("tool/action = %s/%v", tool, args["action"])
+			}
+			v, present := args["reactivate"]
+			if present != c.wantKey {
+				t.Fatalf("reactivate present=%v, want %v (args=%#v)", present, c.wantKey, args)
+			}
+			if c.wantKey {
+				b, ok := v.(bool)
+				if !ok {
+					t.Fatalf("reactivate must be a bool, got %T (%v)", v, v)
+				}
+				if b != c.wantBool {
+					t.Errorf("reactivate = %v, want %v", b, c.wantBool)
+				}
+			}
+		})
+	}
+}
+
+// TestParseBoolField covers the truthy/falsy/unrecognized parsing directly.
+func TestParseBoolField(t *testing.T) {
+	truthy := []string{"true", "TRUE", "yes", "y", "1", "on", " on "}
+	for _, s := range truthy {
+		if v, ok := parseBoolField(s); !ok || !v {
+			t.Errorf("parseBoolField(%q) = (%v,%v), want (true,true)", s, v, ok)
+		}
+	}
+	falsy := []string{"false", "No", "n", "0", "off"}
+	for _, s := range falsy {
+		if v, ok := parseBoolField(s); !ok || v {
+			t.Errorf("parseBoolField(%q) = (%v,%v), want (false,true)", s, v, ok)
+		}
+	}
+	for _, s := range []string{"", "maybe", "2", "yep"} {
+		if _, ok := parseBoolField(s); ok {
+			t.Errorf("parseBoolField(%q) ok=true, want false (unrecognized)", s)
+		}
+	}
+}
+
 // TestProjectLibrary_InPaletteNotInRing confirms the console tools are reachable
 // from the palette but never cycle in the Shift+Tab work ring.
 func TestProjectLibrary_InPaletteNotInRing(t *testing.T) {

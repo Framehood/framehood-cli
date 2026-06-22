@@ -28,7 +28,13 @@ func newJobsCmd(cfg config.Config) *cobra.Command {
 		if status != "" {
 			a["status"] = status
 		}
-		if limit > 0 {
+		// Only forward --limit when the user explicitly set it, and enforce the
+		// documented 1–100 range so an out-of-bounds value fails clearly instead
+		// of being silently clamped (or rejected) by the server.
+		if cmd.Flags().Changed("limit") {
+			if err := checkLimit(limit, 1, 100); err != nil {
+				return err
+			}
 			a["limit"] = limit
 		}
 		return callTool(cmd, cfg, "get_status", a)
@@ -100,7 +106,10 @@ func newBillingCmd(cfg config.Config) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a := map[string]any{"action": "transactions"}
-			if limit > 0 {
+			if cmd.Flags().Changed("limit") {
+				if err := checkLimit(limit, 1, 50); err != nil {
+					return err
+				}
 				a["limit"] = limit
 			}
 			return callTool(cmd, cfg, "billing", a)
@@ -206,7 +215,12 @@ func runFileDownload(cmd *cobra.Command, cfg config.Config, key, out string) err
 	}
 	url := downloadURLFrom(raw)
 	if url == "" {
-		// Unknown shape — surface what the tool returned rather than guessing.
+		// No usable URL. With -o the user expects a file written, so failing to
+		// extract one is a hard error (non-zero exit) — never report success
+		// without writing. Without -o, surface what the tool returned.
+		if out != "" {
+			return fmt.Errorf("no download URL in the response for %q:\n%s", key, render.PrettyJSON(raw))
+		}
 		fmt.Println(render.PrettyJSON(raw))
 		return nil
 	}

@@ -117,6 +117,15 @@ func framehoodHost(host string) bool {
 // can't break out of the intended /v1/... path.
 func pathSeg(s string) string { return url.PathEscape(s) }
 
+// checkLimit validates an explicitly-set --limit against the documented
+// [min,max] range, returning a clear CLI error when out of bounds.
+func checkLimit(n, min, max int) error {
+	if n < min || n > max {
+		return fmt.Errorf("--limit must be between %d and %d (got %d)", min, max, n)
+	}
+	return nil
+}
+
 // jsonUnmarshal is a tiny alias kept local so command files don't each import
 // encoding/json just for one decode.
 func jsonUnmarshal(raw json.RawMessage, v any) error { return json.Unmarshal(raw, v) }

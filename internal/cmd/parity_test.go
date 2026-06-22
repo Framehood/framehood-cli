@@ -60,6 +60,28 @@ func TestPathSeg(t *testing.T) {
 	}
 }
 
+// TestCheckLimit enforces the documented [min,max] range only when set.
+func TestCheckLimit(t *testing.T) {
+	cases := []struct {
+		n, min, max int
+		wantErr     bool
+	}{
+		{1, 1, 100, false},
+		{100, 1, 100, false},
+		{50, 1, 50, false},
+		{0, 1, 100, true},   // below min
+		{101, 1, 100, true}, // above max
+		{51, 1, 50, true},   // above transactions max
+		{-5, 1, 100, true},
+	}
+	for _, c := range cases {
+		err := checkLimit(c.n, c.min, c.max)
+		if (err != nil) != c.wantErr {
+			t.Errorf("checkLimit(%d,%d,%d) err=%v, wantErr=%v", c.n, c.min, c.max, err, c.wantErr)
+		}
+	}
+}
+
 // TestNewBillingCmd_Subcommands verifies the billing group exposes every action
 // the parity work added (alongside the kept reads).
 func TestNewBillingCmd_Subcommands(t *testing.T) {

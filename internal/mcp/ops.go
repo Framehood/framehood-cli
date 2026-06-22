@@ -185,7 +185,12 @@ func (c *Client) getOnce(ctx context.Context, url, token string) ([]byte, int, e
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// A mid-stream read failure (timeout/reset) would otherwise yield a
+		// truncated body and a confusing downstream unmarshal error. Surface it.
+		return nil, resp.StatusCode, fmt.Errorf("read response body: %w", err)
+	}
 	return body, resp.StatusCode, nil
 }
 
