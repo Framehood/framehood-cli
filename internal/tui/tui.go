@@ -171,6 +171,9 @@ type model struct {
 	outputDir  string
 	setdirMode bool
 
+	// version is the build-time CLI version, used by the /upgrade command.
+	version string
+
 	notice string // transient action feedback ("copied", "saved → …")
 	width  int
 	height int
@@ -190,7 +193,8 @@ func (m model) generating() bool {
 // Run starts the interactive studio. auth wires the `/login` and `/logout`
 // palette commands (may be nil). cfg locates the persisted history + settings
 // (output dir); its config dir may be empty, which disables persistence.
-func Run(client *mcp.Client, email string, auth Authenticator, cfg config.Config) error {
+// version is the build-time CLI version, used by /upgrade.
+func Run(client *mcp.Client, email string, auth Authenticator, cfg config.Config, version string) error {
 	// The work-action ring is built from the catalog; an empty ring would mean
 	// a broken/empty catalog. Fail clearly rather than index workActions[0].
 	if len(workActions) == 0 {
@@ -228,6 +232,7 @@ func Run(client *mcp.Client, email string, auth Authenticator, cfg config.Config
 		histPath:  historyPath,
 		cfg:       cfg,
 		outputDir: cfg.OutputDir(), // "" = current working directory
+		version:   version,
 	}
 	// Load past generations so they appear immediately. A missing/corrupt file
 	// loads as empty (loadHistory never errors).
@@ -514,6 +519,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginResultMsg:
 		return m.handleLoginResult(msg)
 
+	case upgradeResultMsg:
+		return m.handleUpgradeResult(msg)
+
 	case spinner.TickMsg:
 		// Advance the generating-wave animation on the same cadence as the
 		// spinner (so we don't schedule a second ticker). Only while actually
@@ -653,6 +661,8 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 			return m.setFocus(zoneOutput), nil
 		case "setdir":
 			return m.startSetdir(), nil
+		case "upgrade":
+			return m.runUpgrade()
 		case "quit":
 			return m, tea.Quit
 		}
