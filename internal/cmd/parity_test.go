@@ -44,6 +44,120 @@ func TestDownloadURLFrom(t *testing.T) {
 	}
 }
 
+// TestIsPublicDownload distinguishes a public files(download) payload (no-auth
+// /files/public URL, "public":true) from a private one ("public":false, an
+// auth-gated /files/{key} URL the OAuth token can't fetch).
+func TestIsPublicDownload(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"public true", `{"key":"a.png","public":true,"download_url":"https://mcp.framehood.ai/files/public/u/a.png"}`, true},
+		{"private false", `{"key":"a.png","public":false,"download_url":"https://mcp.framehood.ai/files/private/a.png"}`, false},
+		{"missing flag", `{"download_url":"https://x"}`, false},
+		{"garbage", `not json`, false},
+	}
+	for _, c := range cases {
+		if got := isPublicDownload(json.RawMessage(c.raw)); got != c.want {
+			t.Errorf("%s: isPublicDownload = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// filesToolServer mocks the worker's /mcp endpoint for the files tool. It
+// records the (action) of each tools/call and returns a canned payload per
+// action, so a test can assert the call sequence runFileDownload drives.
+type filesToolServer struct {
+	actions  []string
+	download string // JSON payload for action=download
+	publish  string // JSON payload for action=publish
+}
+
+func (f *filesToolServer) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Params struct {
+				Name      string `json:"name"`
+				Arguments struct {
+					Action string `json:"action"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		action := req.Params.Arguments.Action
+		f.actions = append(f.actions, action)
+		var payload string
+		switch action {
+		case "download":
+			payload = f.download
+		case "publish":
+			payload = f.publish
+		case "unpublish":
+			payload = `{"ok":true,"key":"clip.mp4","location":"private"}`
+		default:
+			payload = `{"ok":true}`
+		}
+		// Wrap the tool payload as an MCP tools/call result (content[0].text).
+		inner, _ := json.Marshal(payload)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%s}]}}`, inner)
+	}
+}
+
+// TestRunFileDownload_PrivatePublishesAndRestores is the regression guard for the
+// 401 bug: a private file (which the OAuth token can't fetch at /files/{key})
+// must be transiently published, then unpublished to restore state. We make the
+// published URL non-Framehood so saveURLToFile fails fast (no network), and
+// assert the unpublish still ran — a failed fetch must never leave the file
+// public.
+func TestRunFileDownload_PrivatePublishesAndRestores(t *testing.T) {
+	fts := &filesToolServer{
+		download: `{"key":"clip.mp4","public":false,"download_url":"https://mcp.framehood.ai/files/private/clip.mp4"}`,
+		// Non-Framehood host → saveURLToFile refuses, exercising the failure path.
+		publish: `{"ok":true,"public_url":"https://not-framehood.example/clip.mp4"}`,
+	}
+	srv := httptest.NewServer(fts.handler())
+	defer srv.Close()
+
+	cfg := testSessionConfig(t, srv.URL)
+	out := filepath.Join(t.TempDir(), "clip.mp4")
+	err := runFileDownload(bgCmd(), cfg, "clip.mp4", out)
+	if err == nil {
+		t.Fatal("expected an error when the published URL is non-Framehood")
+	}
+	// download → publish → unpublish, in that order; unpublish must run despite
+	// the fetch failure so the file is restored to private.
+	want := []string{"download", "publish", "unpublish"}
+	if len(fts.actions) != len(want) {
+		t.Fatalf("action sequence = %v, want %v", fts.actions, want)
+	}
+	for i, a := range want {
+		if fts.actions[i] != a {
+			t.Fatalf("action[%d] = %q, want %q (full: %v)", i, fts.actions[i], a, fts.actions)
+		}
+	}
+}
+
+// TestRunFileDownload_PrivateNoOutPrintsPayload verifies that without -o a
+// private file does NOT publish (no state mutation) — it just prints the
+// payload, leaving the file untouched.
+func TestRunFileDownload_PrivateNoOutPrintsPayload(t *testing.T) {
+	fts := &filesToolServer{
+		download: `{"key":"clip.mp4","public":false,"download_url":"https://mcp.framehood.ai/files/private/clip.mp4"}`,
+	}
+	srv := httptest.NewServer(fts.handler())
+	defer srv.Close()
+
+	cfg := testSessionConfig(t, srv.URL)
+	if err := runFileDownload(bgCmd(), cfg, "clip.mp4", ""); err != nil {
+		t.Fatalf("no-out private download should not error: %v", err)
+	}
+	if len(fts.actions) != 1 || fts.actions[0] != "download" {
+		t.Fatalf("without -o only download should be called, got %v", fts.actions)
+	}
+}
+
 // TestFramehoodHost restricts downloads to framehood.ai and its subdomains.
 func TestFramehoodHost(t *testing.T) {
 	cases := []struct {
