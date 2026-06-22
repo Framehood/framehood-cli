@@ -472,30 +472,47 @@ func fmtAPIKeysList(raw json.RawMessage) (string, bool) {
 	return table([]string{"key", "name", "status", "created", "last used"}, rows), true
 }
 
-// --- models / workflows / skill (REST read endpoints) ---
+// --- models / workflows / skill (zvs:// catalog reads over /mcp) ---
 
-// models.list → {models:[{name, category}], total}. The model catalog.
+// modelRow is one catalog entry. The MCP models resource (zvs://models) returns
+// a bare array of these; the legacy REST shape wrapped them as {models:[…]}.
+type modelRow struct {
+	Name     string `json:"name"`
+	Category string `json:"category"`
+}
+
+// models.list → either a bare array [{name, category}] (the zvs://models MCP
+// resource) or {models:[{name, category}], total} (the legacy REST shape). Both
+// are rendered as the same model catalog table.
 func fmtModelsList(raw json.RawMessage) (string, bool) {
-	var v struct {
-		Models []struct {
-			Name     string `json:"name"`
-			Category string `json:"category"`
-		} `json:"models"`
-		Total *int `json:"total"`
+	var models []modelRow
+	var total *int
+
+	// Try the bare-array shape first (what the MCP resource returns).
+	if err := json.Unmarshal(raw, &models); err != nil {
+		// Fall back to the wrapped {models, total} object shape.
+		var v struct {
+			Models []modelRow `json:"models"`
+			Total  *int       `json:"total"`
+		}
+		if err := json.Unmarshal(raw, &v); err != nil || v.Models == nil {
+			return "", false
+		}
+		models, total = v.Models, v.Total
 	}
-	if err := json.Unmarshal(raw, &v); err != nil || v.Models == nil {
-		return "", false
-	}
-	if len(v.Models) == 0 {
+
+	if len(models) == 0 {
 		return "No models.", true
 	}
-	rows := make([][]string, 0, len(v.Models))
-	for _, m := range v.Models {
+	rows := make([][]string, 0, len(models))
+	for _, m := range models {
 		rows = append(rows, []string{orDash(m.Name), orDash(m.Category)})
 	}
 	out := table([]string{"model", "category"}, rows)
-	if v.Total != nil {
-		out += fmt.Sprintf("\n%s", plural(*v.Total, "model"))
+	if total != nil {
+		out += fmt.Sprintf("\n%s", plural(*total, "model"))
+	} else {
+		out += fmt.Sprintf("\n%s", plural(len(models), "model"))
 	}
 	return out, true
 }

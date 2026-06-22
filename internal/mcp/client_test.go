@@ -91,6 +91,63 @@ func TestCallTool_SurfacesToolError(t *testing.T) {
 	}
 }
 
+func TestReadResource_ReturnsContentText(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("ReadResource did not attach the bearer token: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// resources/read result: one content item whose text is the resource body.
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"zvs://models","mimeType":"application/json","text":"[{\"name\":\"flux_schnell\",\"category\":\"image\"}]"}]}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &staticTokens{access: "tok"})
+	raw, err := c.ReadResource(context.Background(), "zvs://models")
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	if string(raw) != `[{"name":"flux_schnell","category":"image"}]` {
+		t.Fatalf("unexpected resource body: %s", raw)
+	}
+}
+
+// TestReadResource_RefreshesOn401 is the catalog-read analogue of
+// TestCall_RefreshesOn401: a 401 on the first read must trigger exactly one
+// token refresh and a retry carrying the refreshed token. This is the
+// regression guard for the auth bug — the catalog reads (models/workflows/
+// skills) now go through ReadResource over /mcp, so they must refresh-on-401
+// exactly like every other authenticated request.
+func TestReadResource_RefreshesOn401(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok2" {
+			t.Errorf("retry used wrong token: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"zvs://models","mimeType":"application/json","text":"[]"}]}}`)
+	}))
+	defer srv.Close()
+
+	tok := &staticTokens{access: "tok1", refreshed: "tok2"}
+	c := New(srv.URL, tok)
+	raw, err := c.ReadResource(context.Background(), "zvs://models")
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	if string(raw) != `[]` {
+		t.Fatalf("unexpected resource body after refresh: %s", raw)
+	}
+	if tok.calls != 1 {
+		t.Fatalf("expected exactly one refresh, got %d", tok.calls)
+	}
+}
+
 func TestParseSSE_SkipsUnrelatedEvents(t *testing.T) {
 	stream := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
 		sseBody(7, `{"done":true}`)

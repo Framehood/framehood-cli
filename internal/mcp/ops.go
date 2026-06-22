@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -71,6 +69,37 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		return nil, fmt.Errorf("%s", strings.TrimSpace(strings.TrimPrefix(text, "Error:")))
 	}
 	return json.RawMessage(text), nil
+}
+
+// resourceContent is one item of an MCP resources/read result.
+type resourceContent struct {
+	URI      string `json:"uri"`
+	MIMEType string `json:"mimeType"`
+	Text     string `json:"text"`
+}
+
+type resourceResult struct {
+	Contents []resourceContent `json:"contents"`
+}
+
+// ReadResource reads an MCP resource by URI (resources/read) and returns the
+// text body of its first content item. It goes through Call, so it carries the
+// same bearer token and the same refresh-on-401 retry as every tool invocation
+// — the read endpoints are reached over /mcp (where the CLI's OAuth token is
+// valid), never as a raw REST GET (where it is not).
+func (c *Client) ReadResource(ctx context.Context, uri string) (json.RawMessage, error) {
+	raw, err := c.Call(ctx, "resources/read", map[string]any{"uri": uri})
+	if err != nil {
+		return nil, err
+	}
+	var rr resourceResult
+	if err := json.Unmarshal(raw, &rr); err != nil {
+		return nil, fmt.Errorf("decode resource result: %w", err)
+	}
+	if len(rr.Contents) == 0 {
+		return nil, fmt.Errorf("resource %q returned no content", uri)
+	}
+	return json.RawMessage(rr.Contents[0].Text), nil
 }
 
 // Submit calls a domain tool once and returns the (possibly non-terminal) job
@@ -139,59 +168,6 @@ func (c *Client) Generate(ctx context.Context, tool string, args map[string]any,
 			}
 		}
 	}
-}
-
-// GetJSON performs an authenticated GET against an absolute REST URL (the
-// worker proxies /v1/... to the Go server) and returns the raw body. It mirrors
-// Call's refresh-and-retry: a 401 triggers one token refresh before retrying.
-// Non-2xx responses surface the trimmed body as an error so the caller sees the
-// server's hint (e.g. a 404 not_found).
-func (c *Client) GetJSON(ctx context.Context, url string) (json.RawMessage, error) {
-	body, status, err := c.getOnce(ctx, url, c.Tokens.Access())
-	if err != nil {
-		return nil, err
-	}
-	if status == http.StatusUnauthorized {
-		newTok, rerr := c.Tokens.Refresh(ctx)
-		if rerr != nil {
-			return nil, fmt.Errorf("unauthorized and refresh failed: %w", rerr)
-		}
-		body, status, err = c.getOnce(ctx, url, newTok)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if status == http.StatusUnauthorized {
-		return nil, fmt.Errorf("unauthorized — run `framehood login`")
-	}
-	if status >= 300 {
-		return nil, fmt.Errorf("request failed: HTTP %d: %s", status, strings.TrimSpace(string(body)))
-	}
-	return json.RawMessage(body), nil
-}
-
-// getOnce performs a single authenticated GET and returns the body + status.
-func (c *Client) getOnce(ctx context.Context, url, token string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Accept", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		// A mid-stream read failure (timeout/reset) would otherwise yield a
-		// truncated body and a confusing downstream unmarshal error. Surface it.
-		return nil, resp.StatusCode, fmt.Errorf("read response body: %w", err)
-	}
-	return body, resp.StatusCode, nil
 }
 
 // Balance returns the current credit balance via the billing tool.

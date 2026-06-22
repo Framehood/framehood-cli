@@ -1,13 +1,28 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// bgCmd returns a cobra command carrying a background context, so helpers that
+// call cmd.Context() (e.g. runWorkflowsList) get a usable context outside of an
+// Execute call.
+func bgCmd() *cobra.Command {
+	c := &cobra.Command{}
+	c.SetContext(context.Background())
+	return c
+}
 
 // TestDownloadURLFrom checks the files(download) payload extraction: it prefers
 // download_url, then public_url, and returns "" for an unrecognized shape.
@@ -123,6 +138,78 @@ func TestNewKeysCmd_Subcommands(t *testing.T) {
 		if !have[w] {
 			t.Errorf("keys missing subcommand %q", w)
 		}
+	}
+}
+
+// testSessionConfig writes a non-expired credentials file in a temp dir and
+// returns a Config pointing the MCP base at mcpBase, so NewSession loads a
+// usable session without touching the real ~/.framehood credentials.
+func testSessionConfig(t *testing.T, mcpBase string) config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	creds := `{"access_token":"tok"}` // no expiry → never treated as expired
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(creds), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	return config.Config{MCPBase: mcpBase, ConfigDir: dir}
+}
+
+// workflowResource renders a resources/read result whose body is a workflow
+// skill payload ({name, type, content}).
+func workflowResource(name, content string) string {
+	body, _ := json.Marshal(map[string]string{"name": name, "type": "workflow", "content": content})
+	inner, _ := json.Marshal(string(body))
+	return fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"zvs://workflow/%s","mimeType":"application/json","text":%s}]}}`,
+		name, inner,
+	)
+}
+
+// TestRunWorkflowsList_AllReadsFail is the regression guard for the CodeRabbit
+// finding: when every workflow read fails, the command must return the
+// underlying error rather than silently rendering an empty ("No workflows.")
+// catalog that looks like success.
+func TestRunWorkflowsList_AllReadsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Every resources/read returns a server error → ReadResource errors.
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "boom")
+	}))
+	defer srv.Close()
+
+	cfg := testSessionConfig(t, srv.URL)
+	err := runWorkflowsList(bgCmd(), cfg)
+	if err == nil {
+		t.Fatal("expected an error when every workflow read fails, got nil")
+	}
+}
+
+// TestRunWorkflowsList_PartialSuccess verifies partial tolerance: if some reads
+// succeed, those render and a failing read does not abort the listing or
+// surface an error.
+func TestRunWorkflowsList_PartialSuccess(t *testing.T) {
+	// Only the first known workflow resolves; the rest 500.
+	first := knownWorkflows[0]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Params struct {
+				URI string `json:"uri"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Params.URI == "zvs://workflow/"+pathSeg(first) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, workflowResource(first, "# First\n\nThe first workflow."))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "boom")
+	}))
+	defer srv.Close()
+
+	cfg := testSessionConfig(t, srv.URL)
+	if err := runWorkflowsList(bgCmd(), cfg); err != nil {
+		t.Fatalf("partial success must not error, got: %v", err)
 	}
 }
 

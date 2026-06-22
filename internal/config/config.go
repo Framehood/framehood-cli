@@ -199,19 +199,11 @@ func EnsureDir(path string) (string, error) {
 	return abs, nil
 }
 
-// MCPEndpoint is the JSON-RPC endpoint URL.
+// MCPEndpoint is the JSON-RPC endpoint URL. Every authenticated CLI request —
+// tool calls and the catalog reads (models/workflows/skills, via zvs://
+// resources) — goes through this endpoint, because the OAuthProvider that
+// issues and validates the CLI's access token only wraps /mcp.
 func (c Config) MCPEndpoint() string { return c.MCPBase + "/mcp" }
-
-// APIBase is the origin that serves the REST API (the `/v1/...` read endpoints
-// like /v1/models and /v1/workflows). The MCP worker proxies everything under
-// /v1/ to the Go server, so the MCP origin doubles as the REST origin; an
-// explicit override is honored for local development.
-func (c Config) APIBase() string {
-	return envOr("FRAMEHOOD_API_BASE", c.MCPBase)
-}
-
-// APIEndpoint joins the API base with a leading-slash path (e.g. "/v1/models").
-func (c Config) APIEndpoint(path string) string { return c.APIBase() + path }
 
 // AuthorizeURL, TokenURL, RegisterURL are the OAuth 2.1 endpoints.
 func (c Config) AuthorizeURL() string { return c.MCPBase + "/authorize" }
