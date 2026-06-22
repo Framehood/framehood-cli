@@ -194,7 +194,8 @@ func (m model) workingView() string {
 	return line
 }
 
-// historyView: recent generations table (most recent first).
+// historyView: recent generations table (most recent first), with a paging
+// indicator ("RECENT · 7–12 of 143") when there is more than one page.
 func (m model) historyView() string {
 	if len(m.rows) == 0 {
 		return ""
@@ -203,7 +204,22 @@ func (m model) historyView() string {
 	if m.focus == zoneOutput {
 		label = styAcc.Render("▸ ") + label
 	}
+	label += styDim.Render("  ·  " + m.historyRangeLabel())
+	if m.historyPages() > 1 {
+		label += styDim.Render("   ⇞ ⇟ page")
+	}
 	return "\n" + label + "\n" + m.hist.View()
+}
+
+// historyRangeLabel renders the "7–12 of 143" indicator for the current page,
+// counting newest-first (entry 1 is the newest).
+func (m model) historyRangeLabel() string {
+	total := len(m.history)
+	if total == 0 {
+		return "0 of 0"
+	}
+	lo, hi := m.pageBounds()
+	return fmt.Sprintf("%d–%d of %d", lo+1, hi, total)
 }
 
 func fmtDur(d time.Duration) string {

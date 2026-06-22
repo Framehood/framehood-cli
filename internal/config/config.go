@@ -46,6 +46,13 @@ func (c Config) CredentialsPath() string {
 	return filepath.Join(c.ConfigDir, "credentials.json")
 }
 
+// HistoryPath is the file storing the local studio generation history
+// (type/prompt/url/timestamp only — no tokens). It lives alongside the
+// credentials in the config dir.
+func (c Config) HistoryPath() string {
+	return filepath.Join(c.ConfigDir, "history.json")
+}
+
 // MCPEndpoint is the JSON-RPC endpoint URL.
 func (c Config) MCPEndpoint() string { return c.MCPBase + "/mcp" }
 
