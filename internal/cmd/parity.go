@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/Framehood/framehood-cli/internal/config"
+	"github.com/Framehood/framehood-cli/internal/mcp"
 	"github.com/Framehood/framehood-cli/internal/render"
 	"github.com/spf13/cobra"
 )
@@ -176,8 +180,12 @@ func newFilesCmd(cfg config.Config) *cobra.Command {
 	var out string
 	download := &cobra.Command{
 		Use:   "download <key>",
-		Short: "Get a usable URL for a file (write it to disk with -o)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Get a usable URL for a file, or write it to disk with -o",
+		Long: "Get a usable URL for a file (write it to disk with -o).\n\n" +
+			"A private file is fetched by transiently publishing it, downloading the\n" +
+			"public URL, then unpublishing it again — so the file ends up exactly as\n" +
+			"it started. Public files are fetched directly.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFileDownload(cmd, cfg, args[0], out)
 		},
@@ -204,14 +212,26 @@ func newFilesCmd(cfg config.Config) *cobra.Command {
 }
 
 // runFileDownload resolves a download URL via files(download) and either prints
-// it or, when -o is given, fetches the bytes to disk (reusing the existing
-// safe-download helper that validates the path and streams the body).
+// it or, when -o is given, fetches the bytes to disk.
+//
+// Auth note: the CLI's stored credential is the worker OAuthProvider's opaque
+// access token, valid only on the /mcp endpoint. The download action returns a
+// /files/public/... URL for a published file (no auth — fetchable directly) but
+// an auth-gated /files/private/... URL for a private one. That private route is
+// authenticated by the worker's authenticate() (Supabase JWT or API key) and
+// rejects the OAuth token with a 401 — so the CLI cannot fetch a private file's
+// bytes with the token it holds. To make any listed file downloadable in the
+// same session as `files list`, a private file is transiently published (which
+// yields a no-auth public URL), fetched, then unpublished to restore its prior
+// state. Both publish and unpublish run through the same /mcp `files` tool the
+// listing uses, so they carry the valid token.
 func runFileDownload(cmd *cobra.Command, cfg config.Config, key, out string) error {
 	sess, err := NewSession(cfg)
 	if err != nil {
 		return err
 	}
-	raw, err := sess.Client().CallTool(cmd.Context(), "files", map[string]any{"action": "download", "filename": key})
+	client := sess.Client()
+	raw, err := client.CallTool(cmd.Context(), "files", map[string]any{"action": "download", "filename": key})
 	if err != nil {
 		return err
 	}
@@ -226,17 +246,70 @@ func runFileDownload(cmd *cobra.Command, cfg config.Config, key, out string) err
 		fmt.Println(render.PrettyJSON(raw))
 		return nil
 	}
+
+	// A private file's download_url points at the auth-gated /files/{key} route,
+	// which the OAuth token can't authenticate. Resolving a public URL needs a
+	// transient publish, which mutates state — so only do it when actually
+	// writing bytes (-o). Without -o, print the URL plus the tool's note so the
+	// user still gets the (authenticated) path to fetch themselves.
+	if !isPublicDownload(raw) {
+		if out == "" {
+			fmt.Println(render.PrettyJSON(raw))
+			return nil
+		}
+		return downloadPrivateViaPublish(cmd, client, sess.Access(), key, out)
+	}
+
 	if out == "" {
 		fmt.Println(url)
 		return nil
 	}
-	// A private file's download_url needs the caller's bearer token; pass it so
-	// the fetch is authenticated. Public URLs ignore the header harmlessly.
 	if err := saveURLToFile(cmd.Context(), url, out, sess.Access()); err != nil {
 		return err
 	}
 	fmt.Printf("✓ saved → %s\n", out)
 	return nil
+}
+
+// downloadPrivateViaPublish makes a private file fetchable by the CLI's OAuth
+// token: it publishes the file (moving it to the no-auth public tier and
+// returning a public_url), fetches that URL, then unpublishes to move it back to
+// private — leaving the storage in its original state. The unpublish runs even
+// when the fetch fails so a failed download never leaves the file publicly
+// exposed.
+func downloadPrivateViaPublish(cmd *cobra.Command, client *mcp.Client, token, key, out string) error {
+	pubRaw, err := client.CallTool(cmd.Context(), "files", map[string]any{"action": "publish", "filename": key})
+	if err != nil {
+		return fmt.Errorf("could not publish %q to download it: %w", key, err)
+	}
+	publicURL := downloadURLFrom(pubRaw)
+	// Once the file is published, it MUST be restored to private no matter how the
+	// rest of the function exits — so register the restore in a defer before doing
+	// anything that can fail or block.
+	defer restorePrivate(cmd.Context(), client, key)
+	if publicURL == "" {
+		return fmt.Errorf("no public URL returned when publishing %q:\n%s", key, render.PrettyJSON(pubRaw))
+	}
+	if err := saveURLToFile(cmd.Context(), publicURL, out, token); err != nil {
+		return err
+	}
+	fmt.Printf("✓ saved → %s\n", out)
+	return nil
+}
+
+// restorePrivate unpublishes key, moving a transiently-published file back to
+// private. It deliberately runs on a context DETACHED from parent (via
+// WithoutCancel): the restore must complete even if the parent context was
+// cancelled (ctrl-c / timeout mid-download) — otherwise a cancelled download
+// would leave the file PUBLIC. A short timeout still bounds the call so it can't
+// hang forever. A failure is reported (never silently swallowed) but not
+// returned, since this runs in a defer after the primary result is decided.
+func restorePrivate(parent context.Context, client *mcp.Client, key string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 30*time.Second)
+	defer cancel()
+	if _, err := client.CallTool(ctx, "files", map[string]any{"action": "unpublish", "filename": key}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not unpublish %q after download — it may still be public: %v\n", key, err)
+	}
 }
 
 // --- keys (api_keys: list | create | delete) ---

@@ -64,6 +64,20 @@ func downloadURLFrom(raw json.RawMessage) string {
 	return v.PublicURL
 }
 
+// isPublicDownload reports whether a files(download) payload describes a public
+// file — one whose download_url is the no-auth /files/public/... path. The
+// worker sets "public":true only for those; a private file is "public":false
+// and its URL is the auth-gated /files/{key} route the OAuth token can't fetch.
+func isPublicDownload(raw json.RawMessage) bool {
+	var v struct {
+		Public bool `json:"public"`
+	}
+	if jsonUnmarshal(raw, &v) != nil {
+		return false
+	}
+	return v.Public
+}
+
 // saveURLToFile fetches rawURL and writes the body to out. The fetch is
 // restricted to Framehood hosts (the worker/CDN origin the files tool returns)
 // and carries the caller's bearer token so authenticated /files/ URLs for
