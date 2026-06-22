@@ -58,3 +58,30 @@ func (s *Session) Refresh(ctx context.Context) (string, error) {
 func (s *Session) Client() *mcp.Client {
 	return mcp.New(s.cfg.MCPEndpoint(), s)
 }
+
+// studioAuth bridges the interactive studio's `/login` and `/logout` palette
+// commands to the same auth flow the `login`/`logout` cobra commands use. It
+// implements tui.Authenticator.
+type studioAuth struct{ cfg config.Config }
+
+// Login runs the browser OAuth flow, persists the credentials, and returns a
+// fresh MCP client + email — mirroring newLoginCmd.
+func (a studioAuth) Login(ctx context.Context) (*mcp.Client, string, error) {
+	creds, err := auth.Login(ctx, a.cfg, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := auth.Save(a.cfg.CredentialsPath(), creds); err != nil {
+		return nil, "", err
+	}
+	sess, err := NewSession(a.cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return sess.Client(), sess.Email(), nil
+}
+
+// Logout clears the stored credentials — the same path as newLogoutCmd.
+func (a studioAuth) Logout() error {
+	return auth.Clear(a.cfg.CredentialsPath())
+}

@@ -18,8 +18,9 @@ type keyMap struct {
 	Generate  key.Binding // enter — submit active action
 	Esc       key.Binding // esc — close palette / cancel form
 
-	// Type selector (palette-closed)
-	ShiftTab  key.Binding // shift+tab — cycle generation type (image→video→audio)
+	// Action selector (palette-closed): cycle the work-action ring.
+	ShiftTab key.Binding // shift+tab — next work action
+	Tab      key.Binding // tab — previous work action
 
 	// Output quick-keys (history pane)
 	Up   key.Binding // ↑/k — move history selection
@@ -45,7 +46,8 @@ func defaultKeys() keyMap {
 		Generate: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "generate")),
 		Esc:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close/cancel")),
 
-		ShiftTab: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "type")),
+		ShiftTab: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "action")),
+		Tab:      key.NewBinding(key.WithKeys("tab")),
 
 		Up:   key.NewBinding(key.WithKeys("up", "k")),
 		Down: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↑↓", "select")),

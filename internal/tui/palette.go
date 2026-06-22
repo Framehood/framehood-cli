@@ -25,12 +25,17 @@ type paletteCmd struct {
 }
 
 // metaCmds are the built-in slash commands that don't map to catalog actions.
+// Service commands (login/logout/whoami) live in the `/` palette ONLY — they
+// are never part of the Shift+Tab work-action ring.
 var metaCmds = []paletteCmd{
 	{id: "/help", title: "help", kind: cmdImmediate, meta: "help"},
 	{id: "/new", title: "new", kind: cmdImmediate, meta: "new"},
 	{id: "/open", title: "open", kind: cmdImmediate, meta: "open"},
 	{id: "/copy", title: "copy url", kind: cmdImmediate, meta: "copy"},
 	{id: "/save", title: "save", kind: cmdImmediate, meta: "save"},
+	{id: "/login", title: "login", kind: cmdImmediate, meta: "login"},
+	{id: "/logout", title: "logout", kind: cmdImmediate, meta: "logout"},
+	{id: "/whoami", title: "whoami", kind: cmdImmediate, meta: "whoami"},
 	{id: "/quit", title: "quit", kind: cmdImmediate, meta: "quit"},
 	// TODO: /upgrade  — leave hook; implement later
 	// TODO: /setdir   — leave hook; implement later

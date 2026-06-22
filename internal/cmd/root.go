@@ -9,6 +9,10 @@ import (
 // Version is set at build time via -ldflags "-X .../cmd.Version=...".
 var Version = "dev"
 
+// studioAuth must satisfy the studio's Authenticator contract so the `/login`
+// and `/logout` palette commands work.
+var _ tui.Authenticator = studioAuth{}
+
 // Execute builds the command tree and runs it.
 func Execute() error {
 	cfg, err := config.Load()
@@ -24,13 +28,14 @@ func Execute() error {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// No subcommand → launch the interactive TUI. It opens even when signed
-		// out (shows a "not signed in" state and prompts for `framehood login`).
+		// out (shows a "not signed in" state; /login signs in from inside).
 		RunE: func(cmd *cobra.Command, args []string) error {
+			authn := studioAuth{cfg: cfg}
 			sess, err := NewSession(cfg)
 			if err != nil {
-				return tui.Run(nil, "")
+				return tui.Run(nil, "", authn)
 			}
-			return tui.Run(sess.Client(), sess.Email())
+			return tui.Run(sess.Client(), sess.Email(), authn)
 		},
 	}
 

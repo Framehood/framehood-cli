@@ -39,12 +39,7 @@ var (
 			BorderForeground(colAccent).
 			Padding(0, 1)
 
-	// Type-selector chips.
-	styChip = lipgloss.NewStyle().
-		Padding(0, 2).
-		MarginRight(1).
-		Foreground(colMuted)
-
+	// Active work-action chip in the header.
 	styChipActive = lipgloss.NewStyle().
 			Padding(0, 2).
 			MarginRight(1).

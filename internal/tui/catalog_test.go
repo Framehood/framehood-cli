@@ -180,45 +180,116 @@ func TestImmediateFlagAllowlist(t *testing.T) {
 	}
 }
 
-// TestShiftTabCyclesType verifies that shift+tab advances the genType and
-// updates the action to the appropriate default.
-func TestShiftTabCyclesType(t *testing.T) {
+// TestWorkActionsRing verifies the Shift+Tab ring is built from the catalog,
+// excludes every service/read/immediate action, and contains the expected
+// generation/manipulation/QA actions.
+func TestWorkActionsRing(t *testing.T) {
+	if len(workActions) == 0 {
+		t.Fatal("workActions ring is empty")
+	}
+
+	// The ring must NEVER include a service group or any read/immediate action.
+	for _, a := range workActions {
+		if serviceTools[a.tool] {
+			t.Errorf("work ring contains service action %s·%s (group %q is service-only)",
+				a.tool, a.action, a.tool)
+		}
+		if a.immediate {
+			t.Errorf("work ring contains immediate read-action %s·%s", a.tool, a.action)
+		}
+		if a.kind == kindRead {
+			t.Errorf("work ring contains read action %s·%s", a.tool, a.action)
+		}
+	}
+
+	// First entry is image·create (the startup default).
+	if workActions[0].tool != "image" || workActions[0].action != "create" {
+		t.Errorf("workActions[0] = %s·%s, want image·create",
+			workActions[0].tool, workActions[0].action)
+	}
+
+	// A representative sample of actions that MUST be present.
+	wantPresent := []string{
+		"image·create", "image·edit", "image·upscale", "image·animate", "image·actor_sheet",
+		"video·create", "video·edit", "video·lipsync", "video·scene",
+		"audio·speak", "audio·sfx", "audio·music", "audio·mix", "audio·concat",
+		"actor·create", "actor·update", "actor·batch",
+		"qa·full", "qa·person", "qa·transcript", "qa·image",
+	}
+	have := map[string]bool{}
+	for _, a := range workActions {
+		have[a.tool+"·"+a.action] = true
+	}
+	for _, id := range wantPresent {
+		if !have[id] {
+			t.Errorf("work ring missing expected action %q", id)
+		}
+	}
+
+	// Actions that MUST NOT be present (service + read).
+	wantAbsent := []string{
+		"billing·balance", "billing·plans", "billing·plan", "billing·subscribe",
+		"org·info", "org·members", "org·spend", "org·invite",
+		"files·list", "files·upload", "get_status·check",
+		"actor·list", "actor·get", // kindRead
+	}
+	for _, id := range wantAbsent {
+		if have[id] {
+			t.Errorf("work ring must not contain %q", id)
+		}
+	}
+}
+
+// TestShiftTabCyclesWorkActions verifies Shift+Tab advances forward through the
+// work ring, Tab reverses it, both wrap, and neither ever lands on a
+// service/billing/org/files/get_status or read action.
+func TestShiftTabCyclesWorkActions(t *testing.T) {
 	m := newTestModel()
-	// Should start on image (typeImage).
-	if m.genType != typeImage {
-		t.Fatalf("initial genType = %v, want typeImage", m.genType)
-	}
+	// Startup default is the first work action: image·create.
 	if m.action.tool != "image" || m.action.action != "create" {
-		t.Fatalf("initial action = %s.%s, want image.create", m.action.tool, m.action.action)
+		t.Fatalf("initial action = %s·%s, want image·create", m.action.tool, m.action.action)
 	}
 
-	// Shift+Tab once → video.
-	nm, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
-	m = nm.(model)
-	if m.genType != typeVideo {
-		t.Errorf("after 1 shift+tab: genType = %v, want typeVideo", m.genType)
+	// Walk the entire ring forward via Shift+Tab; it must return to the start
+	// after len(workActions) presses and never visit a service/read action.
+	n := len(workActions)
+	seen := map[string]bool{}
+	cur := m
+	for i := 0; i < n; i++ {
+		nm, _ := cur.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
+		cur = nm.(model)
+		a := cur.action
+		if serviceTools[a.tool] || a.immediate || a.kind == kindRead {
+			t.Fatalf("after %d shift+tab: landed on non-work action %s·%s", i+1, a.tool, a.action)
+		}
+		seen[a.tool+"·"+a.action] = true
 	}
-	if m.action.tool != "video" || m.action.action != "scene" {
-		t.Errorf("after 1 shift+tab: action = %s.%s, want video.scene", m.action.tool, m.action.action)
+	if cur.action.tool != "image" || cur.action.action != "create" {
+		t.Errorf("after a full forward loop: action = %s·%s, want image·create (wrap)",
+			cur.action.tool, cur.action.action)
+	}
+	if len(seen) != n {
+		t.Errorf("forward loop visited %d distinct actions, want %d (the whole ring)", len(seen), n)
 	}
 
-	// Shift+Tab again → audio.
-	nm, _ = m.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
-	m = nm.(model)
-	if m.genType != typeAudio {
-		t.Errorf("after 2 shift+tab: genType = %v, want typeAudio", m.genType)
+	// One Shift+Tab forward then one Tab back returns to image·create.
+	fwd, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
+	mf := fwd.(model)
+	if mf.action.tool == "image" && mf.action.action == "create" {
+		t.Fatalf("shift+tab did not advance off image·create: %s·%s", mf.action.tool, mf.action.action)
 	}
-	if m.action.tool != "audio" || m.action.action != "speak" {
-		t.Errorf("after 2 shift+tab: action = %s.%s, want audio.speak", m.action.tool, m.action.action)
+	back, _ := mf.updateInput(tea.KeyMsg{Type: tea.KeyTab})
+	mb := back.(model)
+	if mb.action.tool != "image" || mb.action.action != "create" {
+		t.Errorf("shift+tab then tab = %s·%s, want image·create", mb.action.tool, mb.action.action)
 	}
 
-	// Shift+Tab again → wraps back to image.
-	nm, _ = m.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
-	m = nm.(model)
-	if m.genType != typeImage {
-		t.Errorf("after 3 shift+tab: genType = %v, want typeImage (wrap)", m.genType)
-	}
-	if m.action.tool != "image" || m.action.action != "create" {
-		t.Errorf("after 3 shift+tab: action = %s.%s, want image.create", m.action.tool, m.action.action)
+	// Tab from the first action wraps to the LAST work action.
+	back2, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyTab})
+	mb2 := back2.(model)
+	last := workActions[n-1]
+	if mb2.action.tool != last.tool || mb2.action.action != last.action {
+		t.Errorf("tab from first action = %s·%s, want last %s·%s",
+			mb2.action.tool, mb2.action.action, last.tool, last.action)
 	}
 }

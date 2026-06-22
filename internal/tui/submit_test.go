@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -56,6 +57,69 @@ func TestSubmit_RunnableCapturesInflight(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("expected a submit command")
+	}
+}
+
+// TestSubmit_BlocksEmptyPrompt verifies a needs-prompt work action does not
+// submit when the prompt box is empty (or whitespace), and sets a "needs:"
+// notice instead.
+func TestSubmit_BlocksEmptyPrompt(t *testing.T) {
+	m := newTestModel()
+	m.focus = zoneInput
+	m.action = findAction(t, "image", "create") // runnable, needs a prompt
+	m.input.SetValue("   ")                      // whitespace only
+
+	nm, cmd := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
+	got := nm.(model)
+	if got.phase == phaseWorking {
+		t.Error("must not submit a runnable action with an empty prompt")
+	}
+	if cmd != nil {
+		t.Error("no submit command should be issued for an empty prompt")
+	}
+	if got.notice == "" {
+		t.Error("an empty required prompt should set a 'needs:' notice")
+	}
+	if !strings.Contains(got.notice, "needs") {
+		t.Errorf("notice = %q, want it to mention what's needed", got.notice)
+	}
+
+	// A non-empty prompt on the same action DOES submit.
+	m2 := newTestModel()
+	m2.focus = zoneInput
+	m2.action = findAction(t, "image", "create")
+	m2.input.SetValue("a red fox")
+	nm2, cmd2 := m2.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
+	if nm2.(model).phase != phaseWorking || cmd2 == nil {
+		t.Error("a non-empty prompt should submit the work action")
+	}
+}
+
+// TestSubmit_FormBlocksMissingRequired verifies a needs-form action does not
+// submit while a required field is empty, and that submitForm itself guards.
+func TestSubmit_FormBlocksMissingRequired(t *testing.T) {
+	// image.edit needs image_url + prompt.
+	m := newTestModel().startForm(findAction(t, "image", "edit"))
+	m.formVals = map[string]string{"image_url": "https://x/i.jpg", "prompt": ""}
+
+	nm, cmd := m.submitForm()
+	got := nm.(model)
+	if got.phase == phaseWorking {
+		t.Error("submitForm must not submit with a missing required field")
+	}
+	if cmd != nil {
+		t.Error("submitForm must not issue a command when a field is missing")
+	}
+	if !strings.Contains(got.notice, "needs") {
+		t.Errorf("notice = %q, want a 'needs:' list", got.notice)
+	}
+
+	// Fill the missing field → it submits.
+	got.formFields = m.formFields // submitForm cleared nothing on the blocked path
+	got.formVals["prompt"] = "make it night"
+	nm2, cmd2 := got.submitForm()
+	if nm2.(model).phase != phaseWorking || cmd2 == nil {
+		t.Error("submitForm should submit once all required fields are filled")
 	}
 }
 

@@ -51,26 +51,60 @@ type historyItem struct {
 	failed bool
 }
 
-// typeIndex is the cycling position for Shift+Tab type selection.
-// 0 = image, 1 = video, 2 = audio.
-type typeIndex int
+// composerPlaceholder is the prompt-box hint shown in the default (non-form)
+// composer state.
+const composerPlaceholder = "type a prompt · / for commands · ⇧⇥ to change action"
 
-const (
-	typeImage typeIndex = iota
-	typeVideo
-	typeAudio
-	numTypes = 3
-)
+// serviceTools are the catalog groups Shift+Tab must NOT cycle through: account
+// reads/management and job status. Their actions reach the studio only through
+// the `/` command palette, never the work-action ring.
+var serviceTools = map[string]bool{
+	"billing":    true,
+	"org":        true,
+	"files":      true,
+	"get_status": true,
+}
 
-// defaultActionForType maps a typeIndex to the catalog action to set.
-var defaultActionForType = [numTypes]struct{ tool, action string }{
-	typeImage: {"image", "create"},
-	typeVideo: {"video", "scene"},
-	typeAudio: {"audio", "speak"},
+// workActions is the ordered ring Shift+Tab cycles through: every
+// generation / manipulation / QA action across image, video, audio, qa and
+// actor — excluding service groups (billing, org, files, get_status) and the
+// immediate read-actions (e.g. actor·list/get, which return information rather
+// than producing media). Built once from the catalog so it stays in sync.
+var workActions = buildWorkActions()
+
+// buildWorkActions flattens the catalog into the Shift+Tab ring, preserving
+// catalog order and skipping service groups + immediate read-actions.
+func buildWorkActions() []actionSpec {
+	var out []actionSpec
+	for _, g := range catalog {
+		if serviceTools[g.tool] {
+			continue
+		}
+		for _, a := range g.actions {
+			if a.immediate || a.kind == kindRead {
+				continue // read-only info actions stay out of the work ring
+			}
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// workActionIndex returns the position of spec in the workActions ring, or -1
+// if spec is not a work action (e.g. a service/read action picked from the
+// palette).
+func workActionIndex(spec actionSpec) int {
+	for i, a := range workActions {
+		if a.tool == spec.tool && a.action == spec.action {
+			return i
+		}
+	}
+	return -1
 }
 
 type model struct {
 	client   *mcp.Client
+	auth     Authenticator // browser login/logout for /login + /logout (may be nil in tests)
 	email    string
 	loggedIn bool
 
@@ -86,9 +120,6 @@ type model struct {
 
 	// palette state
 	palette paletteState
-
-	// current generation type (cycles with shift+tab)
-	genType typeIndex
 
 	// form mode: when formFields is non-empty the prompt box is a sequential
 	// per-parameter field editor for a form-driven action.
@@ -111,10 +142,11 @@ type model struct {
 	height  int
 }
 
-// Run starts the interactive studio.
-func Run(client *mcp.Client, email string) error {
+// Run starts the interactive studio. auth wires the `/login` and `/logout`
+// palette commands; it may be nil (those commands then report unavailable).
+func Run(client *mcp.Client, email string, auth Authenticator) error {
 	ti := textinput.New()
-	ti.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
+	ti.Placeholder = composerPlaceholder
 	ti.Focus()
 	ti.CharLimit = 1000
 	ti.Prompt = "› "
@@ -125,16 +157,16 @@ func Run(client *mcp.Client, email string) error {
 
 	m := model{
 		client:   client,
+		auth:     auth,
 		email:    email,
 		loggedIn: client != nil,
 		input:    ti,
 		spin:     sp,
 		help:     help.New(),
 		hist:     newHistoryTable(),
-		action:   catalog[0].actions[0], // image · create (a runnable default)
+		action:   workActions[0], // image · create — the first work action
 		keys:     defaultKeys(),
 		focus:    zoneInput, // start ready to type
-		genType:  typeImage,
 		balance:  "…",
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
@@ -248,6 +280,13 @@ type savedMsg struct {
 	err  error
 }
 
+// loginResultMsg carries the outcome of the off-thread `/login` browser flow.
+type loginResultMsg struct {
+	client *mcp.Client
+	email  string
+	err    error
+}
+
 // setFocus moves focus to z, keeping the textinput's Focus/Blur in sync.
 func (m model) setFocus(z focusZone) model {
 	m.focus = z
@@ -259,24 +298,26 @@ func (m model) setFocus(z focusZone) model {
 	return m
 }
 
-// findAction looks up an actionSpec by tool + action name.
-func findCatalogAction(tool, action string) (actionSpec, bool) {
-	for _, g := range catalog {
-		for _, a := range g.actions {
-			if a.tool == tool && a.action == action {
-				return a, true
-			}
-		}
+// cycleWorkAction advances the active action to the next (dir=+1) or previous
+// (dir=-1) entry in the workActions ring, wrapping at both ends. If the current
+// action is not a work action (it was picked from the palette as a service/read
+// action), the ring resumes from its first/last entry.
+func (m model) cycleWorkAction(dir int) model {
+	n := len(workActions)
+	if n == 0 {
+		return m
 	}
-	return actionSpec{}, false
-}
-
-// applyGenType sets m.action to the default action for the current genType.
-func (m model) applyGenType() model {
-	t := defaultActionForType[m.genType]
-	if a, ok := findCatalogAction(t.tool, t.action); ok {
-		m.action = a
+	cur := workActionIndex(m.action)
+	var next int
+	switch {
+	case cur < 0 && dir > 0:
+		next = 0
+	case cur < 0: // dir < 0
+		next = n - 1
+	default:
+		next = (cur + dir%n + n) % n
 	}
+	m.action = workActions[next]
 	return m
 }
 
@@ -337,6 +378,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = styGreen.Render("saved → " + msg.path)
 		}
 		return m, nil
+
+	case loginResultMsg:
+		return m.handleLoginResult(msg)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -448,6 +492,12 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 				return m.setFocus(zoneInput), saveCmd(it.url)
 			}
 			return m.setFocus(zoneInput), nil
+		case "login":
+			return m.runLogin()
+		case "logout":
+			return m.runLogout()
+		case "whoami":
+			return m.runWhoami()
 		case "quit":
 			return m, tea.Quit
 		}
@@ -641,7 +691,7 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.formFields, m.formVals = nil, nil
 		m.input.SetValue("")
-		m.input.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
+		m.input.Placeholder = composerPlaceholder
 		return m.setFocus(zoneInput), nil
 	case "ctrl+r":
 		if cur.isMedia() {
@@ -663,7 +713,7 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if miss := m.formMissing(); miss != "" {
-			m.notice = styRed.Render("fill in: " + miss)
+			m.notice = styRed.Render("needs: " + miss)
 			return m, nil
 		}
 		return m.submitForm()
@@ -675,6 +725,11 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // submitForm builds the args from collected values and dispatches the job.
 func (m model) submitForm() (tea.Model, tea.Cmd) {
+	// Required-field validation: never submit a form with empty required fields.
+	if miss := m.formMissing(); miss != "" {
+		m.notice = styRed.Render("needs: " + miss)
+		return m, nil
+	}
 	if !m.loggedIn {
 		m.phase = phaseError
 		m.errMsg = "You're not signed in. Quit and run `framehood login` first."
@@ -690,13 +745,13 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	m.started = time.Now()
 	m.formFields = nil
 	m.input.SetValue("")
-	m.input.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
+	m.input.Placeholder = composerPlaceholder
 	return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 }
 
 // updateInput: the prompt field is focused — text editing happens here.
 // `/` at start of input (or on empty input) opens the palette.
-// Shift+Tab cycles the generation type.
+// Shift+Tab advances the work-action ring (Tab reverses it).
 // Enter submits with the active action.
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if len(m.formFields) > 0 {
@@ -705,10 +760,15 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, m.keys.ShiftTab):
-		// Cycle generation type: image → video → audio → image.
-		m.genType = typeIndex((int(m.genType) + 1) % numTypes)
-		m = m.applyGenType()
-		m.input.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
+		// Next work action (e.g. image·create → image·edit → … → actor·batch → wrap).
+		m = m.cycleWorkAction(+1)
+		m.notice = ""
+		return m, nil
+
+	case key.Matches(msg, m.keys.Tab):
+		// Previous work action (reverse of Shift+Tab).
+		m = m.cycleWorkAction(-1)
+		m.notice = ""
 		return m, nil
 
 	case msg.String() == "/" && strings.TrimSpace(m.input.Value()) == "":
@@ -737,13 +797,15 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.errMsg = "You're not signed in. Quit and run `framehood login` first."
 			return m.setFocus(zoneOutput), nil
 		}
-		prompt := strings.TrimSpace(m.input.Value())
-		if prompt == "" {
-			return m, nil
-		}
 		if !m.action.runnable() {
 			// Selection moved to a form-driven action — open the form.
 			return m.startForm(m.action), nil
+		}
+		prompt := strings.TrimSpace(m.input.Value())
+		if prompt == "" {
+			// Required-field validation: a needs-prompt action can't submit empty.
+			m.notice = styRed.Render("needs: " + m.actionNeeds())
+			return m, nil
 		}
 		m.phase = phaseWorking
 		m.status = "submitting"
@@ -761,6 +823,19 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// actionNeeds is the comma-joined list of required inputs for the active
+// action, used in the "needs: …" validation notice. It prefers the catalog's
+// declared `needs` list and falls back to the prompt field name.
+func (m model) actionNeeds() string {
+	if len(m.action.needs) > 0 {
+		return strings.Join(m.action.needs, ", ")
+	}
+	if m.action.promptField != "" {
+		return m.action.promptField
+	}
+	return "input"
 }
 
 // handleJob advances the state machine from a freshly observed job.

@@ -60,18 +60,11 @@ func (m model) View() string {
 
 // Header: title on the left, account/balance (or signed-out) on the right.
 func (m model) headerView(w int) string {
-	// Type indicator (replaces the old nav chips).
-	typeName := [numTypes]string{"image", "video", "audio"}[m.genType]
-	typeChip := styChipActive.Render(typeName)
-	for i := typeIndex(0); i < numTypes; i++ {
-		if i == m.genType {
-			continue
-		}
-		typeChip += styChip.Render([numTypes]string{"image", "video", "audio"}[i])
-	}
+	// Active work-action chip (Shift+Tab cycles it).
+	actionChip := styChipActive.Render(m.action.tool + " · " + m.action.action)
 
 	left := styTitle.Render("✦ Framehood") + styDim.Render(" studio") +
-		styDim.Render("  ") + typeChip
+		styDim.Render("  ") + actionChip
 
 	var right string
 	if !m.loggedIn {
