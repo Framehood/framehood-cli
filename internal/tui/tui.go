@@ -67,7 +67,7 @@ func fromPersisted(e persistedEntry) historyItem {
 
 // composerPlaceholder is the prompt-box hint shown in the default (non-form)
 // composer state.
-const composerPlaceholder = "type a prompt · / for commands · ⇧⇥ to change action"
+const composerPlaceholder = "type a prompt · / for commands · ⇥ to change action"
 
 // signedOutMsg is shown when an action needs auth but the studio is signed out.
 // It points at the in-TUI /login (no need to quit the studio anymore).
@@ -178,6 +178,10 @@ type model struct {
 	version string
 	// upgrading guards against concurrent /upgrade self-replace attempts.
 	upgrading bool
+
+	// quitArmed is set after a first ctrl+c; a second ctrl+c then quits. Any
+	// other key disarms it (a single accidental ctrl+c never exits).
+	quitArmed bool
 
 	notice string // transient action feedback ("copied", "saved → …")
 	width  int
@@ -458,9 +462,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		// ctrl+c always quits regardless of state.
+		// Double ctrl+c to quit: the first ctrl+c arms + notices; a second ctrl+c
+		// (while armed) quits. This applies in every state.
 		if key.Matches(msg, m.keys.ForceQuit) {
-			return m, tea.Quit
+			if m.quitArmed {
+				return m, tea.Quit
+			}
+			m.quitArmed = true
+			m.notice = styDim.Render("press ctrl+c again to quit")
+			return m, nil
+		}
+		// Any other key disarms the quit (a stray ctrl+c never exits on its own).
+		if m.quitArmed {
+			m.quitArmed = false
+			m.notice = ""
 		}
 
 		// Palette is open — route all keys there.
@@ -589,7 +604,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updatePalette handles all key events while the palette overlay is open.
+// updatePalette handles all key events while the palette overlay is open. The
+// slash command is edited LIVE in the compose input (so paste, cursor moves,
+// and backspace work natively); the palette filters/highlights by that text.
 func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Esc):
@@ -601,7 +618,12 @@ func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.seedURL = ""
 		return m.setFocus(zoneInput), nil
 
-	case key.Matches(msg, m.keys.Generate): // enter → run selected command
+	case key.Matches(msg, m.keys.Generate): // enter
+		// A fully-typed/pasted command runs directly; otherwise run the
+		// highlighted grid item.
+		if cmd, remainder, ok := resolveSlashInput(m.input.Value()); ok {
+			return m.runParsedCommand(cmd, remainder)
+		}
 		cmd := m.palette.selected()
 		if cmd == nil {
 			return m, nil
@@ -625,22 +647,19 @@ func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
-		// Any printable character refines the filter query.
-		s := msg.String()
-		switch s {
-		case "backspace", "ctrl+h":
-			if len(m.palette.query) > 0 {
-				runes := []rune(m.palette.query)
-				m.palette.query = string(runes[:len(runes)-1])
-				m.palette.refilter()
-			}
-		default:
-			if len(s) == 1 {
-				m.palette.query += s
-				m.palette.refilter()
-			}
+		// Editing keys flow to the live compose input; the palette query then
+		// re-syncs from it. Backspacing away the leading "/" closes the palette.
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		val := m.input.Value()
+		if !strings.HasPrefix(strings.TrimSpace(val), "/") {
+			// The "/" was removed — leave palette mode back to plain compose.
+			m.palette = paletteState{}
+			m.seedURL = ""
+			return m.setFocus(zoneInput), cmd
 		}
-		return m, nil
+		m.palette.syncFromInput(val)
+		return m, cmd
 	}
 }
 
@@ -758,6 +777,55 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 		m.input.Placeholder = "Describe what to create…"
 		return m.setFocus(zoneInput), nil
 	}
+}
+
+// runParsedCommand runs a command resolved from a fully-typed/pasted slash
+// command, routing the remainder (text after the command name) as a prompt or
+// argument. When the remainder is empty it falls back to runPaletteCmd's normal
+// behaviour (open the prompt/form, run the meta/immediate action).
+func (m model) runParsedCommand(cmd *paletteCmd, remainder string) (tea.Model, tea.Cmd) {
+	remainder = strings.TrimSpace(remainder)
+
+	// Meta commands: only /setdir consumes an inline argument today.
+	if cmd.meta != "" {
+		if cmd.meta == "setdir" && remainder != "" {
+			// Close the palette and apply the path directly (no setdir prompt).
+			m.palette = paletteState{}
+			m.input.SetValue("")
+			m.seedURL = ""
+			abs, err := m.cfg.SetOutputDir(remainder)
+			if err != nil {
+				m.notice = styRed.Render("invalid output dir: " + err.Error())
+				return m.setFocus(zoneInput), nil
+			}
+			m.outputDir = abs
+			m.notice = styGreen.Render("output dir → " + abs)
+			return m.setFocus(zoneInput), nil
+		}
+		return m.runPaletteCmd(cmd)
+	}
+
+	// Catalog command with an inline prompt: a runnable (prompt) action submits
+	// the remainder immediately (`/image create a red fox`).
+	if remainder != "" && cmd.spec != nil && cmd.kind == cmdNeedsPrompt && cmd.spec.runnable() {
+		if !m.loggedIn {
+			m.palette = paletteState{}
+			m.input.SetValue("")
+			m.phase = phaseError
+			m.errMsg = signedOutMsg
+			return m.setFocus(zoneInput), nil
+		}
+		m.palette = paletteState{}
+		m.input.SetValue("")
+		m.notice = ""
+		m.seedURL = ""
+		m.action = *cmd.spec
+		return m.submitPrompt(remainder)
+	}
+
+	// Anything else (no usable remainder, immediate read, or a form action):
+	// run the command's normal flow.
+	return m.runPaletteCmd(cmd)
 }
 
 // updateOutput: the history table is focused — ↑↓ select a past generation
@@ -1036,14 +1104,15 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
-	case key.Matches(msg, m.keys.ShiftTab):
+	case key.Matches(msg, m.keys.Tab):
 		// Next work action (e.g. image·create → image·edit → … → actor·batch → wrap).
+		// Plain Tab is the primary forward cycle — no Shift needed.
 		m = m.cycleWorkAction(+1)
 		m.notice = ""
 		return m, nil
 
-	case key.Matches(msg, m.keys.Tab):
-		// Previous work action (reverse of Shift+Tab).
+	case key.Matches(msg, m.keys.ShiftTab):
+		// Previous work action (reverse of Tab).
 		m = m.cycleWorkAction(-1)
 		m.notice = ""
 		return m, nil
@@ -1066,9 +1135,12 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.String() == "/" && strings.TrimSpace(m.input.Value()) == "":
-		// Open the palette when the input is empty or the typed char is '/'.
-		m.input.SetValue("")
+		// Open the palette. The leading "/" lives in the compose input (typed +
+		// editable); the palette below filters/highlights by the text after it.
+		m.input.SetValue("/")
+		m.input.CursorEnd()
 		m.palette = openPaletteState()
+		m.palette.syncFromInput(m.input.Value())
 		m.palette.layout(m.contentWidth()) // persist cols for grid ↑/↓ nav
 		return m, nil
 
@@ -1087,6 +1159,11 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.phase == phaseWorking {
 			return m, nil
 		}
+		// A fully-typed or PASTED slash command (palette closed) runs directly —
+		// `/files list`, `/balance`, `/setdir <path>`, `/image create <prompt>`.
+		if cmd, remainder, ok := resolveSlashInput(m.input.Value()); ok {
+			return m.runParsedCommand(cmd, remainder)
+		}
 		if !m.loggedIn {
 			m.phase = phaseError
 			m.errMsg = signedOutMsg
@@ -1102,17 +1179,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.notice = styRed.Render("needs: " + m.actionNeeds())
 			return m, nil
 		}
-		m.inputHist.add(prompt) // record for ↑/↓ recall (dedup + cap inside)
-		m.phase = phaseWorking
-		m.status = "submitting"
-		m.result, m.errMsg, m.jobID = "", "", ""
-		m.readData, m.readHdr = "", ""
-		m.genFrame = 0
-		m.inflight = m.action
-		m.inflightLabel = prompt
-		m.started = time.Now()
-		tool, args := argsForAction(m.action, prompt)
-		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
+		return m.submitPrompt(prompt)
 	}
 
 	if m.phase != phaseWorking {
@@ -1124,6 +1191,23 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// submitPrompt dispatches the active (runnable) action with prompt, recording it
+// for ↑/↓ recall and entering the working phase. Shared by the Enter path and a
+// fully-typed slash command (`/image create <prompt>`).
+func (m model) submitPrompt(prompt string) (tea.Model, tea.Cmd) {
+	m.inputHist.add(prompt) // record for ↑/↓ recall (dedup + cap inside)
+	m.phase = phaseWorking
+	m.status = "submitting"
+	m.result, m.errMsg, m.jobID = "", "", ""
+	m.readData, m.readHdr = "", ""
+	m.genFrame = 0
+	m.inflight = m.action
+	m.inflightLabel = prompt
+	m.started = time.Now()
+	tool, args := argsForAction(m.action, prompt)
+	return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 }
 
 // actionNeeds is the comma-joined list of required inputs for the active

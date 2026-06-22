@@ -18,7 +18,7 @@ func helpListed(hc helpContext, primary string) bool {
 func TestShortHelp_FocusAware(t *testing.T) {
 	k := defaultKeys()
 
-	// Input zone (primary surface): must advertise /, shift+tab, enter.
+	// Input zone (primary surface): must advertise /, tab, shift+tab, enter.
 	// q must NOT appear (not a bound key here).
 	in := helpContext{keys: k, focus: zoneInput}
 	if helpListed(in, "q") {
@@ -27,11 +27,11 @@ func TestShortHelp_FocusAware(t *testing.T) {
 	if !helpListed(in, "/") {
 		t.Error("input zone help should list / (open palette)")
 	}
-	if !helpListed(in, "shift+tab") {
-		t.Error("input zone help should list shift+tab (next action)")
-	}
 	if !helpListed(in, "tab") {
-		t.Error("input zone help should list tab (prev action — reverse cycle)")
+		t.Error("input zone help should list tab (next action — primary cycle)")
+	}
+	if !helpListed(in, "shift+tab") {
+		t.Error("input zone help should list shift+tab (prev action — reverse cycle)")
 	}
 	if !helpListed(in, "enter") {
 		t.Error("input zone help should list enter (generate)")

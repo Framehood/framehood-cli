@@ -240,27 +240,27 @@ func TestWorkActionsRing(t *testing.T) {
 	}
 }
 
-// TestShiftTabCyclesWorkActions verifies Shift+Tab advances forward through the
-// work ring, Tab reverses it, both wrap, and neither ever lands on a
-// service/billing/org/files/get_status or read action.
-func TestShiftTabCyclesWorkActions(t *testing.T) {
+// TestTabCyclesWorkActions verifies plain Tab advances FORWARD through the work
+// ring (the primary, no-Shift cycle), Shift+Tab reverses it, both wrap, and
+// neither ever lands on a service/billing/org/files/get_status or read action.
+func TestTabCyclesWorkActions(t *testing.T) {
 	m := newTestModel()
 	// Startup default is the first work action: image·create.
 	if m.action.tool != "image" || m.action.action != "create" {
 		t.Fatalf("initial action = %s·%s, want image·create", m.action.tool, m.action.action)
 	}
 
-	// Walk the entire ring forward via Shift+Tab; it must return to the start
+	// Walk the entire ring forward via plain Tab; it must return to the start
 	// after len(workActions) presses and never visit a service/read action.
 	n := len(workActions)
 	seen := map[string]bool{}
 	cur := m
 	for i := 0; i < n; i++ {
-		nm, _ := cur.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
+		nm, _ := cur.updateInput(tea.KeyMsg{Type: tea.KeyTab})
 		cur = nm.(model)
 		a := cur.action
 		if serviceTools[a.tool] || a.immediate || a.kind == kindRead {
-			t.Fatalf("after %d shift+tab: landed on non-work action %s·%s", i+1, a.tool, a.action)
+			t.Fatalf("after %d tab: landed on non-work action %s·%s", i+1, a.tool, a.action)
 		}
 		seen[a.tool+"·"+a.action] = true
 	}
@@ -272,24 +272,24 @@ func TestShiftTabCyclesWorkActions(t *testing.T) {
 		t.Errorf("forward loop visited %d distinct actions, want %d (the whole ring)", len(seen), n)
 	}
 
-	// One Shift+Tab forward then one Tab back returns to image·create.
-	fwd, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
+	// One Tab forward then one Shift+Tab back returns to image·create.
+	fwd, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyTab})
 	mf := fwd.(model)
 	if mf.action.tool == "image" && mf.action.action == "create" {
-		t.Fatalf("shift+tab did not advance off image·create: %s·%s", mf.action.tool, mf.action.action)
+		t.Fatalf("tab did not advance off image·create: %s·%s", mf.action.tool, mf.action.action)
 	}
-	back, _ := mf.updateInput(tea.KeyMsg{Type: tea.KeyTab})
+	back, _ := mf.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
 	mb := back.(model)
 	if mb.action.tool != "image" || mb.action.action != "create" {
-		t.Errorf("shift+tab then tab = %s·%s, want image·create", mb.action.tool, mb.action.action)
+		t.Errorf("tab then shift+tab = %s·%s, want image·create", mb.action.tool, mb.action.action)
 	}
 
-	// Tab from the first action wraps to the LAST work action.
-	back2, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyTab})
+	// Shift+Tab from the first action wraps backward to the LAST work action.
+	back2, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyShiftTab})
 	mb2 := back2.(model)
 	last := workActions[n-1]
 	if mb2.action.tool != last.tool || mb2.action.action != last.action {
-		t.Errorf("tab from first action = %s·%s, want last %s·%s",
+		t.Errorf("shift+tab from first action = %s·%s, want last %s·%s",
 			mb2.action.tool, mb2.action.action, last.tool, last.action)
 	}
 }
