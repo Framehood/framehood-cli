@@ -20,6 +20,7 @@ import (
 
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/mcp"
+	"github.com/Framehood/framehood-cli/internal/render"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -386,7 +387,10 @@ func (m model) Init() tea.Cmd {
 
 // --- messages ---
 
-type balanceMsg struct{ text string }
+type balanceMsg struct {
+	text  string
+	email string // captured from billing(balance) so the header can show it
+}
 type submittedMsg struct {
 	job mcp.Job
 	err error
@@ -495,6 +499,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case balanceMsg:
 		m.balance = msg.text
+		// The login flow doesn't always capture the email; billing(balance)
+		// returns it, so adopt it for the header when we don't have one yet.
+		if m.email == "" && msg.email != "" {
+			m.email = msg.email
+		}
 		return m, nil
 
 	case submittedMsg:
@@ -532,7 +541,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.setFocus(zoneInput), nil
 		}
 		m.phase = phaseDone
-		m.readData = prettyJSON(msg.raw)
+		m.readData = renderReadable(msg.label, msg.raw)
 		m.readHdr = msg.label
 		m.result, m.errMsg = "", ""
 		m.notice = ""
@@ -1325,7 +1334,8 @@ func loadBalanceCmd(c *mcp.Client) tea.Cmd {
 		if err != nil {
 			return balanceMsg{text: "—"}
 		}
-		return balanceMsg{text: formatBalance(raw)}
+		text, email := formatBalance(raw)
+		return balanceMsg{text: text, email: email}
 	}
 }
 
@@ -1371,6 +1381,27 @@ func prettyJSON(raw json.RawMessage) string {
 	return s
 }
 
+// renderReadable turns an immediate read result into human-readable text using
+// the shared render formatter, keyed by the action's "tool·action" label. Any
+// unhandled shape falls back to the indented JSON so nothing is ever hidden.
+func renderReadable(label string, raw json.RawMessage) string {
+	tool, action, ok := splitLabel(label)
+	if ok {
+		if out, done := render.Readable(tool, action, raw); done {
+			return out
+		}
+	}
+	return prettyJSON(raw)
+}
+
+// splitLabel parses a "tool·action" label into its parts.
+func splitLabel(label string) (tool, action string, ok bool) {
+	if i := strings.Index(label, "·"); i >= 0 {
+		return label[:i], label[i+len("·"):], true
+	}
+	return "", "", false
+}
+
 func pollCmd(c *mcp.Client, jobID string) tea.Cmd {
 	if c == nil {
 		return nil // signed out — drop the poll, no-op
@@ -1383,15 +1414,20 @@ func pollCmd(c *mcp.Client, jobID string) tea.Cmd {
 	}
 }
 
-func formatBalance(raw json.RawMessage) string {
-	var v map[string]any
+// formatBalance renders the header credit string and extracts the caller's
+// email from a billing(balance) payload ({balance, role, email}).
+func formatBalance(raw json.RawMessage) (text, email string) {
+	var v struct {
+		Balance any    `json:"balance"`
+		Email   string `json:"email"`
+	}
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return strings.TrimSpace(string(raw))
+		return strings.TrimSpace(string(raw)), ""
 	}
-	if b, ok := v["balance"]; ok {
-		return fmt.Sprintf("%v credits", b)
+	if v.Balance != nil {
+		return fmt.Sprintf("%v credits", v.Balance), v.Email
 	}
-	return strings.TrimSpace(string(raw))
+	return strings.TrimSpace(string(raw)), v.Email
 }
 
 func openBrowser(target string) error {

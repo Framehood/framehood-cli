@@ -1,0 +1,487 @@
+// Package render turns raw MCP read/console tool payloads into human-readable
+// text. It is a pure formatter shared by the one-shot CLI and the interactive
+// studio's READ panel, so both surfaces show labeled fields and compact tables
+// instead of raw JSON.
+//
+// Every formatter is keyed by tool+action and matched against the EXACT
+// response shapes the worker returns (see worker/src/tools/*.ts and
+// worker/src/handlers/*.ts). Any unknown or unhandled shape falls back to the
+// caller's pretty-print, so no data is ever hidden or lost.
+package render
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Readable renders a tool's raw response for tool+action into human-readable
+// text. It returns ok=false when the action has no dedicated formatter or the
+// payload doesn't match the expected shape — callers then fall back to their
+// own pretty-print (PrettyJSON is provided for that).
+func Readable(tool, action string, raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	f, ok := formatters[tool+"."+action]
+	if !ok {
+		return "", false
+	}
+	return f(raw)
+}
+
+// PrettyJSON indents valid JSON; a bare JSON string is unquoted; anything else
+// is returned trimmed. It never errors — the fallback for unknown shapes.
+func PrettyJSON(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return "(empty)"
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return strings.TrimSpace(str)
+	}
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, raw, "", "  "); err == nil {
+		return indented.String()
+	}
+	return s
+}
+
+// formatter renders one tool.action payload; ok=false means "shape didn't
+// match, fall back".
+type formatter func(raw json.RawMessage) (string, bool)
+
+var formatters = map[string]formatter{
+	"org.info":        fmtOrgInfo,
+	"org.members":     fmtOrgMembers,
+	"org.spend":       fmtOrgSpend,
+	"org.trend":       fmtOrgTrend,
+	"billing.balance": fmtBillingBalance,
+	"billing.plan":    fmtBillingPlan,
+	"billing.plans":   fmtBillingPlans,
+	"files.list":      fmtFilesList,
+	"library.list":    fmtLibraryList,
+	"library.trashed": fmtLibraryList,
+	"project.list":    fmtProjectList,
+	"project.current": fmtProjectCurrent,
+}
+
+// --- org ---
+
+// org.info → {org_id, name, is_personal, your_role, member_count}
+func fmtOrgInfo(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Name        string `json:"name"`
+		IsPersonal  bool   `json:"is_personal"`
+		YourRole    string `json:"your_role"`
+		MemberCount *int   `json:"member_count"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Name == "" {
+		return "", false
+	}
+	var b lines
+	b.kv("Organization", v.Name)
+	if v.YourRole != "" {
+		b.kv("Your role", v.YourRole)
+	}
+	if v.IsPersonal {
+		b.kv("Type", "personal")
+	} else {
+		b.kv("Type", "shared")
+	}
+	if v.MemberCount != nil {
+		b.kv("Members", plural(*v.MemberCount, "member"))
+	}
+	return b.String(), true
+}
+
+// org.members → {members:[{user_id, email, role, active, suspended, joined_at}]}
+// (RPC public.org_members returns explicit `active`/`suspended` booleans; older
+// shapes used `suspended_at` — both are honored.)
+func fmtOrgMembers(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Members []struct {
+			Email       string `json:"email"`
+			Role        string `json:"role"`
+			Suspended   *bool  `json:"suspended"`
+			SuspendedAt any    `json:"suspended_at"`
+			Active      *bool  `json:"active"`
+		} `json:"members"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Members == nil {
+		return "", false
+	}
+	if len(v.Members) == 0 {
+		return "No members.", true
+	}
+	rows := make([][]string, 0, len(v.Members))
+	for _, m := range v.Members {
+		status := "active"
+		switch {
+		case (m.Suspended != nil && *m.Suspended) || (m.Suspended == nil && m.SuspendedAt != nil):
+			status = "suspended"
+		case m.Active != nil && !*m.Active:
+			status = "inactive"
+		}
+		rows = append(rows, []string{orDash(m.Email), orDash(m.Role), status})
+	}
+	return table([]string{"email", "role", "status"}, rows), true
+}
+
+// org.spend → {spend:[{user_id, email, spent, jobs}]}
+// (RPC public.org_member_spend returns columns user_id,email,spent,jobs.)
+func fmtOrgSpend(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Spend []struct {
+			Email string   `json:"email"`
+			Spent *float64 `json:"spent"`
+			Jobs  *int     `json:"jobs"`
+		} `json:"spend"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Spend == nil {
+		return "", false
+	}
+	if len(v.Spend) == 0 {
+		return "No spend recorded.", true
+	}
+	rows := make([][]string, 0, len(v.Spend))
+	for _, s := range v.Spend {
+		jobs := "—"
+		if s.Jobs != nil {
+			jobs = fmt.Sprintf("%d", *s.Jobs)
+		}
+		rows = append(rows, []string{orDash(s.Email), credits(s.Spent), jobs})
+	}
+	return table([]string{"member", "credits spent", "jobs"}, rows), true
+}
+
+// org.trend → {trend:[{day, spent}]}
+// (RPC public.org_spend_trend returns columns day,spent.)
+func fmtOrgTrend(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Trend []struct {
+			Day   string   `json:"day"`
+			Spent *float64 `json:"spent"`
+		} `json:"trend"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Trend == nil {
+		return "", false
+	}
+	if len(v.Trend) == 0 {
+		return "No spend in this window.", true
+	}
+	rows := make([][]string, 0, len(v.Trend))
+	for _, t := range v.Trend {
+		rows = append(rows, []string{orDash(t.Day), credits(t.Spent)})
+	}
+	return table([]string{"day", "credits"}, rows), true
+}
+
+// --- billing ---
+
+// billing.balance → {balance, role, email}
+func fmtBillingBalance(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Balance *float64 `json:"balance"`
+		Plan    string   `json:"plan"`
+		Email   string   `json:"email"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Balance == nil {
+		return "", false
+	}
+	out := credits(v.Balance)
+	if v.Plan != "" {
+		out += "  ·  plan: " + v.Plan
+	}
+	return out, true
+}
+
+// billing.plan → {plan, status, monthly_allowance, balance, role, ...}
+func fmtBillingPlan(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Plan             string   `json:"plan"`
+		Status           string   `json:"status"`
+		MonthlyAllowance *float64 `json:"monthly_allowance"`
+		Balance          *float64 `json:"balance"`
+		Role             string   `json:"role"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Plan == "" {
+		return "", false
+	}
+	var b lines
+	b.kv("Plan", v.Plan)
+	if v.Status != "" {
+		b.kv("Status", v.Status)
+	}
+	if v.Role != "" {
+		b.kv("Role", v.Role)
+	}
+	if v.MonthlyAllowance != nil && *v.MonthlyAllowance > 0 {
+		b.kv("Monthly allowance", credits(v.MonthlyAllowance))
+	}
+	if v.Balance != nil {
+		b.kv("Balance", credits(v.Balance))
+	}
+	return b.String(), true
+}
+
+// billing.plans → {plans:[{tier, credits, price, currency, ...}]}
+func fmtBillingPlans(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Plans []struct {
+			Tier    string   `json:"tier"`
+			Credits *float64 `json:"credits"`
+			Price   *float64 `json:"price"`
+		} `json:"plans"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Plans == nil {
+		return "", false
+	}
+	if len(v.Plans) == 0 {
+		return "No plans available.", true
+	}
+	rows := make([][]string, 0, len(v.Plans))
+	for _, p := range v.Plans {
+		rows = append(rows, []string{orDash(p.Tier), credits(p.Credits)})
+	}
+	return table([]string{"plan", "credits"}, rows), true
+}
+
+// --- files ---
+
+// files.list → {files:[{key, size, uploaded}], truncated}
+func fmtFilesList(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Files []struct {
+			Key      string   `json:"key"`
+			Size     *float64 `json:"size"`
+			Uploaded string   `json:"uploaded"`
+		} `json:"files"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Files == nil {
+		return "", false
+	}
+	if len(v.Files) == 0 {
+		return "No files.", true
+	}
+	rows := make([][]string, 0, len(v.Files))
+	for _, f := range v.Files {
+		rows = append(rows, []string{orDash(f.Key), humanSize(f.Size), shortTime(f.Uploaded)})
+	}
+	out := table([]string{"name", "size", "uploaded"}, rows)
+	if v.Truncated {
+		out += "\n…more (truncated)"
+	}
+	return out, true
+}
+
+// --- library ---
+
+// library.list / library.trashed → {items:[{type, prompt, created_at, ...}], total}
+func fmtLibraryList(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Items []struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Prompt    string `json:"prompt"`
+			CreatedAt string `json:"created_at"`
+		} `json:"items"`
+		Total *int `json:"total"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Items == nil {
+		return "", false
+	}
+	if len(v.Items) == 0 {
+		return "No assets.", true
+	}
+	rows := make([][]string, 0, len(v.Items))
+	for _, it := range v.Items {
+		desc := it.Prompt
+		if desc == "" {
+			desc = it.Name
+		}
+		rows = append(rows, []string{orDash(it.Type), truncate(desc, 48), shortTime(it.CreatedAt)})
+	}
+	out := table([]string{"type", "prompt", "when"}, rows)
+	if v.Total != nil && *v.Total > len(v.Items) {
+		out += fmt.Sprintf("\n%d of %d shown", len(v.Items), *v.Total)
+	}
+	return out, true
+}
+
+// --- project ---
+
+// project.list → {projects:[{name, visibility, ...}]}
+func fmtProjectList(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Projects []projectShape `json:"projects"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Projects == nil {
+		return "", false
+	}
+	if len(v.Projects) == 0 {
+		return "No projects.", true
+	}
+	rows := make([][]string, 0, len(v.Projects))
+	for _, p := range v.Projects {
+		rows = append(rows, []string{orDash(p.Name), orDash(p.Visibility)})
+	}
+	return table([]string{"name", "visibility"}, rows), true
+}
+
+// project.current → {project: {...}|null}
+func fmtProjectCurrent(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Project *projectShape `json:"project"`
+	}
+	// Distinguish "no project key" (unknown shape) from "project: null" (no
+	// active project). Decode into a map first to check the key exists.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return "", false
+	}
+	if _, hasKey := probe["project"]; !hasKey {
+		return "", false
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", false
+	}
+	if v.Project == nil {
+		return "No active project.", true
+	}
+	var b lines
+	b.kv("Active project", orDash(v.Project.Name))
+	if v.Project.Visibility != "" {
+		b.kv("Visibility", v.Project.Visibility)
+	}
+	return b.String(), true
+}
+
+type projectShape struct {
+	Name       string `json:"name"`
+	Visibility string `json:"visibility"`
+}
+
+// --- shared rendering helpers ---
+
+// lines accumulates "Label: value" rows.
+type lines struct{ rows []string }
+
+func (l *lines) kv(k, v string) { l.rows = append(l.rows, k+": "+v) }
+func (l *lines) String() string { return strings.Join(l.rows, "\n") }
+
+// table renders headers + rows as a left-aligned, space-padded grid.
+func table(headers []string, rows [][]string) string {
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len([]rune(h))
+	}
+	for _, r := range rows {
+		for i := 0; i < len(headers) && i < len(r); i++ {
+			if w := len([]rune(r[i])); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	var b strings.Builder
+	writeRow := func(cells []string) {
+		for i := 0; i < len(headers); i++ {
+			cell := ""
+			if i < len(cells) {
+				cell = cells[i]
+			}
+			b.WriteString(cell)
+			if i < len(headers)-1 {
+				b.WriteString(strings.Repeat(" ", widths[i]-len([]rune(cell))+2))
+			}
+		}
+		b.WriteByte('\n')
+	}
+	writeRow(headers)
+	for _, r := range rows {
+		writeRow(r)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
+}
+
+// credits renders a numeric credit value as "N credits" (integer when whole).
+func credits(n *float64) string {
+	if n == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%s credits", num(*n))
+}
+
+// num renders a float without a trailing ".0" for whole numbers.
+func num(f float64) string {
+	if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {
+		return strconv.FormatFloat(f, 'f', 0, 64)
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+func plural(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
+
+// humanSize renders a byte count as a compact human size.
+func humanSize(n *float64) string {
+	if n == nil {
+		return "—"
+	}
+	b := *n
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%dB", int64(b))
+	}
+	div, exp := float64(unit), 0
+	for b/div >= unit && exp < 4 {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", b/div, "KMGT"[exp])
+}
+
+// shortTime renders an ISO-8601 timestamp as "2006-01-02"; non-timestamps pass
+// through trimmed (and "—" when empty).
+func shortTime(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "—"
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999Z07:00", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+	// Already a plain date or unparseable — show the date prefix if present.
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
