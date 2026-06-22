@@ -19,7 +19,6 @@ import (
 	"github.com/Framehood/framehood-cli/internal/mcp"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -36,18 +35,14 @@ const (
 	phaseError
 )
 
-// focusZone is the pane currently receiving keys. This is the fix for the old
-// always-focused-input model: keys are routed by zone, so text editing, tab
-// switching, and result actions never collide.
+// focusZone is the pane currently receiving keys.
+// The palette is a transient overlay on zoneInput, not a separate zone.
 type focusZone int
 
 const (
-	zoneTabs   focusZone = iota // image/video/audio selector — h/l or ←/→ switches
-	zoneInput                   // the prompt field — text editing happens ONLY here
-	zoneOutput                  // the result/history — o/c act here (input is blurred)
+	zoneInput  focusZone = iota // the prompt field — text editing + palette
+	zoneOutput                  // the result/history — o/c/s/u act here
 )
-
-const numZones = 3
 
 type historyItem struct {
 	kind   string
@@ -56,22 +51,44 @@ type historyItem struct {
 	failed bool
 }
 
+// typeIndex is the cycling position for Shift+Tab type selection.
+// 0 = image, 1 = video, 2 = audio.
+type typeIndex int
+
+const (
+	typeImage typeIndex = iota
+	typeVideo
+	typeAudio
+	numTypes = 3
+)
+
+// defaultActionForType maps a typeIndex to the catalog action to set.
+var defaultActionForType = [numTypes]struct{ tool, action string }{
+	typeImage: {"image", "create"},
+	typeVideo: {"video", "scene"},
+	typeAudio: {"audio", "speak"},
+}
+
 type model struct {
 	client   *mcp.Client
 	email    string
 	loggedIn bool
 
-	input         textinput.Model
-	spin          spinner.Model
-	help          help.Model
-	hist          table.Model
-	nav           list.Model
-	keys          keyMap
-	focus         focusZone
-	action        actionSpec // the NAV-selected tool action
+	input   textinput.Model
+	spin    spinner.Model
+	help    help.Model
+	hist    table.Model
+	keys    keyMap
+	focus   focusZone
+	action  actionSpec // currently selected action (shown in composer header)
 	inflight      actionSpec // action captured at submit time (for history attribution)
 	inflightLabel string     // the submitted prompt/summary, for the history row
-	groupTop      []int      // nav index of each tool group's first action (for 1-9 jumps)
+
+	// palette state
+	palette paletteState
+
+	// current generation type (cycles with shift+tab)
+	genType typeIndex
 
 	// form mode: when formFields is non-empty the prompt box is a sequential
 	// per-parameter field editor for a form-driven action.
@@ -97,7 +114,7 @@ type model struct {
 // Run starts the interactive studio.
 func Run(client *mcp.Client, email string) error {
 	ti := textinput.New()
-	ti.Placeholder = "Describe what to create…"
+	ti.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
 	ti.Focus()
 	ti.CharLimit = 1000
 	ti.Prompt = "› "
@@ -106,7 +123,6 @@ func Run(client *mcp.Client, email string) error {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
 
-	nav, groupTop := buildNav()
 	m := model{
 		client:   client,
 		email:    email,
@@ -115,66 +131,14 @@ func Run(client *mcp.Client, email string) error {
 		spin:     sp,
 		help:     help.New(),
 		hist:     newHistoryTable(),
-		nav:      nav,
-		groupTop: groupTop,
 		action:   catalog[0].actions[0], // image · create (a runnable default)
 		keys:     defaultKeys(),
 		focus:    zoneInput, // start ready to type
+		genType:  typeImage,
 		balance:  "…",
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
-}
-
-// navItem adapts an actionSpec to the bubbles/list item interface.
-type navItem struct{ spec actionSpec }
-
-func (n navItem) Title() string {
-	if n.spec.runnable() {
-		return n.spec.tool + " · " + n.spec.action
-	}
-	return n.spec.tool + " · " + n.spec.action + " ›" // › = opens a parameter form
-}
-func (n navItem) Description() string { return n.spec.summary }
-func (n navItem) FilterValue() string {
-	return n.spec.tool + " " + n.spec.action + " " + n.spec.summary
-}
-
-// buildNav flattens the catalog into the NAV list and records each tool group's
-// first index (for the 1-9 group jumps).
-func buildNav() (list.Model, []int) {
-	var items []list.Item
-	var groupTop []int
-	for _, g := range catalog {
-		groupTop = append(groupTop, len(items))
-		for _, a := range g.actions {
-			items = append(items, navItem{a})
-		}
-	}
-	d := list.NewDefaultDelegate()
-	d.ShowDescription = false
-	d.SetSpacing(0)
-	d.Styles.SelectedTitle = d.Styles.SelectedTitle.Foreground(colAccent).BorderForeground(colAccent)
-	d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(colText)
-	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Foreground(colDim)
-
-	l := list.New(items, d, 0, 0)
-	l.Title = "TOOLS"
-	l.Styles.Title = styEyebrow
-	l.SetShowStatusBar(false)
-	l.SetShowHelp(false)
-	l.SetFilteringEnabled(true)
-	l.KeyMap.Quit.SetEnabled(false) // the studio owns quit/esc
-	return l, groupTop
-}
-
-// navSelected returns the actionSpec under the NAV cursor.
-func (m model) navSelected() (actionSpec, bool) {
-	it, ok := m.nav.SelectedItem().(navItem)
-	if !ok {
-		return actionSpec{}, false
-	}
-	return it.spec, true
 }
 
 // newHistoryTable builds the OUTPUT-pane history table. Rows are filled later
@@ -199,8 +163,7 @@ func newHistoryTable() table.Model {
 
 // rebuildHistory refreshes the table rows (newest first) and the parallel
 // `rows` slice used to resolve the selection. selectNewest moves the cursor to
-// the newest row (job completion); otherwise the current selection is preserved
-// (e.g. a resize reflow must not yank the user off the row they were viewing).
+// the newest row (job completion); otherwise the current selection is preserved.
 func (m *model) rebuildHistory(selectNewest bool) {
 	prev := m.hist.Cursor()
 	cols := tableWidth(m.width)
@@ -285,8 +248,7 @@ type savedMsg struct {
 	err  error
 }
 
-// setFocus moves focus to z, keeping the textinput's Focus/Blur in sync so the
-// raw key stream only reaches the input when the input zone is active.
+// setFocus moves focus to z, keeping the textinput's Focus/Blur in sync.
 func (m model) setFocus(z focusZone) model {
 	m.focus = z
 	if z == zoneInput {
@@ -297,8 +259,25 @@ func (m model) setFocus(z focusZone) model {
 	return m
 }
 
-func (m model) cycleFocus(dir int) model {
-	return m.setFocus(focusZone((int(m.focus) + dir + numZones) % numZones))
+// findAction looks up an actionSpec by tool + action name.
+func findCatalogAction(tool, action string) (actionSpec, bool) {
+	for _, g := range catalog {
+		for _, a := range g.actions {
+			if a.tool == tool && a.action == action {
+				return a, true
+			}
+		}
+	}
+	return actionSpec{}, false
+}
+
+// applyGenType sets m.action to the default action for the current genType.
+func (m model) applyGenType() model {
+	t := defaultActionForType[m.genType]
+	if a, ok := findCatalogAction(t.tool, t.action); ok {
+		m.action = a
+	}
+	return m
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -307,38 +286,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = msg.Width - 6
 		m.help.Width = msg.Width - 4
-		navH := msg.Height - 10
-		if navH < 4 {
-			navH = 4
-		}
-		m.nav.SetSize(msg.Width-4, navH)
-		m.rebuildHistory(false) // reflow but keep the user's selected row
+		m.rebuildHistory(false)
 
 	case tea.KeyMsg:
-		// While the NAV filter input is active it owns every key (so typing a
-		// filter never triggers Tab / quit / jumps). ctrl+c still quits.
-		if m.focus == zoneTabs && m.nav.SettingFilter() {
-			if key.Matches(msg, m.keys.ForceQuit) {
-				return m, tea.Quit
-			}
-			var cmd tea.Cmd
-			m.nav, cmd = m.nav.Update(msg)
-			return m, cmd
-		}
-		// Global keys (any zone). Only non-typed keys live here, so they never
-		// steal characters from the prompt field.
-		switch {
-		case key.Matches(msg, m.keys.ForceQuit):
+		// ctrl+c always quits regardless of state.
+		if key.Matches(msg, m.keys.ForceQuit) {
 			return m, tea.Quit
-		case key.Matches(msg, m.keys.Tab):
-			return m.cycleFocus(1), nil
-		case key.Matches(msg, m.keys.ShiftTab):
-			return m.cycleFocus(-1), nil
 		}
-		// Zone-routed keys.
+
+		// Palette is open — route all keys there.
+		if m.palette.isOpen() {
+			return m.updatePalette(msg)
+		}
+
+		// Zone-routed keys (palette closed).
 		switch m.focus {
-		case zoneTabs:
-			return m.updateTabs(msg)
 		case zoneOutput:
 			return m.updateOutput(msg)
 		default: // zoneInput
@@ -391,57 +353,160 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateTabs: the NAV list is focused — browse/filter the tool→action catalog.
-// (Not in filter mode here; filtering is handled before zone routing.)
-func (m model) updateTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// updatePalette handles all key events while the palette overlay is open.
+func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, m.keys.Quit, m.keys.Esc):
-		return m, tea.Quit
-	case key.Matches(msg, m.keys.Help):
-		m.help.ShowAll = !m.help.ShowAll
-		return m, nil
-	case key.Matches(msg, m.keys.Palette): // : → start filtering (palette)
-		return m.openPalette()
-	case msg.String() >= "1" && msg.String() <= "9":
-		if g := int(msg.String()[0] - '1'); g < len(m.groupTop) {
-			m.nav.Select(m.groupTop[g])
+	case key.Matches(msg, m.keys.Esc):
+		// Close palette, restore empty input.
+		m.palette = paletteState{}
+		m.input.SetValue("")
+		return m.setFocus(zoneInput), nil
+
+	case key.Matches(msg, m.keys.Generate): // enter → run selected command
+		cmd := m.palette.selected()
+		if cmd == nil {
+			return m, nil
 		}
+		return m.runPaletteCmd(cmd)
+
+	case key.Matches(msg, m.keys.PaletteLeft):
+		m.palette.moveLeft()
 		return m, nil
-	case key.Matches(msg, m.keys.Write): // enter → pick this action
-		if spec, ok := m.navSelected(); ok {
-			m.action = spec
-			m.notice = ""
-			switch {
-			case spec.runnable():
-				m.formFields = nil
-				m.input.Placeholder = "Describe what to create…"
-				return m.setFocus(zoneInput), nil // go type the prompt
-			case spec.hasForm():
-				return m.startForm(spec), nil
-			default:
-				m.notice = styDim.Render(spec.tool + "·" + spec.action + " isn't available in the studio yet")
+
+	case key.Matches(msg, m.keys.PaletteRight):
+		m.palette.moveRight()
+		return m, nil
+
+	case key.Matches(msg, m.keys.PaletteUp):
+		m.palette.moveUp()
+		return m, nil
+
+	case key.Matches(msg, m.keys.PaletteDown):
+		m.palette.moveDown()
+		return m, nil
+
+	default:
+		// Any printable character refines the filter query.
+		s := msg.String()
+		switch s {
+		case "backspace", "ctrl+h":
+			if len(m.palette.query) > 0 {
+				runes := []rune(m.palette.query)
+				m.palette.query = string(runes[:len(runes)-1])
+				m.palette.refilter()
+			}
+		default:
+			if len(s) == 1 {
+				m.palette.query += s
+				m.palette.refilter()
 			}
 		}
 		return m, nil
 	}
-	// Everything else (↑↓ j/k, `/` to filter, page keys) drives the list.
-	var cmd tea.Cmd
-	m.nav, cmd = m.nav.Update(msg)
-	return m, cmd
 }
 
-// updateOutput: the history table is focused — ↑↓ select a past generation and
-// o/c/s act on it. The input is blurred, so these are verbs, not typed text.
+// runPaletteCmd executes the selected palette command.
+func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
+	// Close the palette first.
+	m.palette = paletteState{}
+	m.input.SetValue("")
+	m.notice = ""
+
+	if cmd.meta != "" {
+		// Meta (immediate) commands.
+		switch cmd.meta {
+		case "help":
+			m.help.ShowAll = !m.help.ShowAll
+			return m.setFocus(zoneInput), nil
+		case "new":
+			if m.phase != phaseWorking {
+				m.phase = phaseIdle
+				m.result, m.errMsg, m.jobID, m.notice = "", "", "", ""
+			}
+			return m.setFocus(zoneInput), nil
+		case "open":
+			if it, ok := m.selectedItem(); ok && it.url != "" {
+				if err := openBrowser(it.url); err != nil {
+					m.notice = styRed.Render("couldn't open: " + err.Error())
+				} else {
+					m.notice = styGreen.Render("opened in browser")
+				}
+			}
+			return m.setFocus(zoneInput), nil
+		case "copy":
+			if it, ok := m.selectedItem(); ok && it.url != "" {
+				if err := copyToClipboard(it.url); err != nil {
+					m.notice = styRed.Render("copy failed: " + err.Error())
+				} else {
+					m.notice = styGreen.Render("copied url to clipboard")
+				}
+			}
+			return m.setFocus(zoneInput), nil
+		case "save":
+			if it, ok := m.selectedItem(); ok && it.url != "" {
+				m.notice = styDim.Render("saving…")
+				return m.setFocus(zoneInput), saveCmd(it.url)
+			}
+			return m.setFocus(zoneInput), nil
+		case "quit":
+			return m, tea.Quit
+		}
+		return m.setFocus(zoneInput), nil
+	}
+
+	// Catalog action.
+	if cmd.spec == nil {
+		return m.setFocus(zoneInput), nil
+	}
+	m.action = *cmd.spec
+
+	switch cmd.kind {
+	case cmdNeedsForm:
+		return m.startForm(*cmd.spec), nil
+	case cmdNeedsPrompt:
+		m.formFields = nil
+		m.input.Placeholder = "Describe what to create…"
+		return m.setFocus(zoneInput), nil
+	default: // cmdImmediate for read-type actions (e.g. billing·balance)
+		// For truly immediate read-only actions (promptField == ""), try to
+		// auto-submit with an empty prompt by delegating to the existing submit
+		// guard. If it's not runnable we leave the action set and let the user
+		// know they may need a form.
+		if cmd.spec.runnable() {
+			// Some actions like billing.balance need no prompt — we submit
+			// immediately with an empty string and let the server handle it.
+			if !m.loggedIn {
+				m.phase = phaseError
+				m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+				return m.setFocus(zoneOutput), nil
+			}
+			m.phase = phaseWorking
+			m.status = "submitting"
+			m.result, m.errMsg, m.jobID = "", "", ""
+			m.inflight = m.action
+			m.inflightLabel = m.action.tool + "·" + m.action.action
+			m.started = time.Now()
+			tool, args := argsForAction(m.action, "")
+			return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
+		}
+		// Has a form — shouldn't reach here but fall back safely.
+		m.input.Placeholder = "Describe what to create…"
+		return m.setFocus(zoneInput), nil
+	}
+}
+
+// updateOutput: the history table is focused — ↑↓ select a past generation
+// and o/c/s act on it.
 func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, m.keys.Quit, m.keys.Esc):
-		return m, tea.Quit
+	case key.Matches(msg, m.keys.Esc):
+		return m.setFocus(zoneInput), nil
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
-	case key.Matches(msg, m.keys.Up, m.keys.Down):
+	case key.Matches(msg, m.keys.Up), key.Matches(msg, m.keys.Down):
 		m.notice = ""
-		m.hist, _ = m.hist.Update(msg) // let the table move its cursor
+		m.hist, _ = m.hist.Update(msg)
 		return m, nil
 	case key.Matches(msg, m.keys.Open):
 		if it, ok := m.selectedItem(); ok && it.url != "" {
@@ -470,13 +535,12 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Use): // chain this result into a new action
 		if it, ok := m.selectedItem(); ok && it.url != "" {
 			m.seedURL = it.url
-			m.notice = styAcc.Render("chaining result → pick an action that takes media")
-			return m.openPalette()
+			m.notice = styAcc.Render("chaining result → pick an action")
+			m.palette = openPaletteState()
+			return m.setFocus(zoneInput), nil
 		}
 		return m, nil
-	case key.Matches(msg, m.keys.Palette):
-		return m.openPalette()
-	case key.Matches(msg, m.keys.New): // enter
+	case key.Matches(msg, m.keys.Generate): // enter → go back to input (start over)
 		if m.phase != phaseWorking {
 			m.phase = phaseIdle
 			m.result, m.errMsg, m.jobID, m.notice = "", "", "", ""
@@ -487,8 +551,8 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// startForm enters per-parameter form mode for a form-driven action, reusing the
-// prompt box as a sequential field editor.
+// startForm enters per-parameter form mode for a form-driven action, reusing
+// the prompt box as a sequential field editor.
 func (m model) startForm(spec actionSpec) model {
 	m.action = spec
 	m.formFields = spec.form()
@@ -505,18 +569,9 @@ func (m model) startForm(spec actionSpec) model {
 		m.seedURL = ""
 	}
 	m.notice = ""
-	m.input.SetValue(m.formVals[m.formFields[0].name]) // shows the seed if field 0 is media
+	m.input.SetValue(m.formVals[m.formFields[0].name])
 	m.input.Placeholder = formPlaceholder(m.formFields[0])
 	return m.setFocus(zoneInput)
-}
-
-// openPalette focuses the NAV list and immediately starts its filter, so the
-// user can fuzzy-jump to any action from anywhere (a lightweight command palette).
-func (m model) openPalette() (tea.Model, tea.Cmd) {
-	m = m.setFocus(zoneTabs)
-	var cmd tea.Cmd
-	m.nav, cmd = m.nav.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	return m, cmd
 }
 
 func formPlaceholder(p paramSpec) string {
@@ -561,9 +616,7 @@ func (m model) formMissing() string {
 	return strings.Join(miss, ", ")
 }
 
-// formSummary is a short human label for a form submission, used as the history
-// prompt (there's no single prompt field). Prefers the text field(s), else a
-// media basename, else the action name.
+// formSummary is a short human label for a form submission.
 func (m model) formSummary() string {
 	var texts []string
 	for _, f := range m.formFields {
@@ -584,9 +637,7 @@ func (m model) formSummary() string {
 	return m.action.action
 }
 
-// updateForm drives the sequential field editor: enter/↓ advance (and submit on
-// the last field), ↑ goes back, esc cancels, ctrl+r fills a media field with the
-// latest result. j/k are NOT bound here so they type normally.
+// updateForm drives the sequential field editor.
 func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	cur := m.formFields[m.formIdx]
 	save := func() { m.formVals[cur.name] = strings.TrimSpace(m.input.Value()) }
@@ -599,8 +650,8 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.formFields, m.formVals = nil, nil
 		m.input.SetValue("")
-		m.input.Placeholder = "Describe what to create…"
-		return m.setFocus(zoneTabs), nil
+		m.input.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
+		return m.setFocus(zoneInput), nil
 	case "ctrl+r":
 		if cur.isMedia() {
 			if u := m.latestResultURL(); u != "" {
@@ -631,7 +682,7 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// submitForm builds the args from the collected values and dispatches the job.
+// submitForm builds the args from collected values and dispatches the job.
 func (m model) submitForm() (tea.Model, tea.Cmd) {
 	if !m.loggedIn {
 		m.phase = phaseError
@@ -648,19 +699,44 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	m.started = time.Now()
 	m.formFields = nil
 	m.input.SetValue("")
-	m.input.Placeholder = "Describe what to create…"
+	m.input.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
 	return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 }
 
-// updateInput: the prompt field is focused — text editing happens here, and the
-// only control keys are esc (leave) and enter (submit).
+// updateInput: the prompt field is focused — text editing happens here.
+// `/` at start of input (or on empty input) opens the palette.
+// Shift+Tab cycles the generation type.
+// Enter submits with the active action.
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if len(m.formFields) > 0 {
 		return m.updateForm(msg)
 	}
+
 	switch {
+	case key.Matches(msg, m.keys.ShiftTab):
+		// Cycle generation type: image → video → audio → image.
+		m.genType = typeIndex((int(m.genType) + 1) % numTypes)
+		m = m.applyGenType()
+		m.input.Placeholder = "type a prompt · / for commands · ⇧⇥ to change type"
+		return m, nil
+
+	case msg.String() == "/" && strings.TrimSpace(m.input.Value()) == "":
+		// Open the palette when the input is empty or the typed char is '/'.
+		m.input.SetValue("")
+		m.palette = openPaletteState()
+		return m, nil
+
 	case key.Matches(msg, m.keys.Esc):
-		return m.setFocus(zoneTabs), nil
+		// If output zone has rows, move focus there; otherwise just clear.
+		if len(m.rows) > 0 {
+			return m.setFocus(zoneOutput), nil
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+
 	case key.Matches(msg, m.keys.Generate): // enter
 		if m.phase == phaseWorking {
 			return m, nil
@@ -675,21 +751,19 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if !m.action.runnable() {
-			// Selection moved to a form-driven action — can't submit from the
-			// prompt box yet. Send the user back to pick a runnable one.
-			m.notice = styDim.Render("needs " + strings.Join(m.action.needs, ", ") +
-				" — pick a runnable action")
-			return m.setFocus(zoneTabs), nil
+			// Selection moved to a form-driven action — open the form.
+			return m.startForm(m.action), nil
 		}
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
-		m.inflight = m.action // attribute the result to the action as it was at submit
+		m.inflight = m.action
 		m.inflightLabel = prompt
 		m.started = time.Now()
 		tool, args := argsForAction(m.action, prompt)
 		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 	}
+
 	if m.phase != phaseWorking {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -706,16 +780,15 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 		if m.status == "" {
 			m.status = "working"
 		}
-		// Schedule the next poll after a short delay.
 		return m, tea.Batch(m.spin.Tick, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 			return pollTickMsg{jobID: j.ID}
 		}))
 	}
 	label := m.inflight.tool + "·" + m.inflight.action
-	if label == "·" { // no captured action (shouldn't happen) → fall back
+	if label == "·" {
 		label = m.action.tool + "·" + m.action.action
 	}
-	prompt := m.inflightLabel // captured at submit (form mode clears the input box)
+	prompt := m.inflightLabel
 	if prompt == "" {
 		prompt = m.input.Value()
 	}
@@ -731,7 +804,6 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 	m.notice = ""
 	m.history = append(m.history, historyItem{kind: label, prompt: prompt, url: m.result})
 	m.rebuildHistory(true)
-	// Auto-focus the output so o/c/s act on the just-finished (newest) row.
 	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
 }
 
@@ -781,7 +853,6 @@ func formatBalance(raw json.RawMessage) string {
 func openBrowser(target string) error {
 	// Only open our own https result URLs — never a server-supplied file://,
 	// javascript:, or off-CDN (phishing) URL reaches open / rundll32 / xdg-open.
-	// (The login flow uses auth.OpenBrowser, not this one, so it's unaffected.)
 	if u, err := url.Parse(target); err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
 		return fmt.Errorf("refusing to open a non-Framehood URL")
 	}
@@ -795,8 +866,7 @@ func openBrowser(target string) error {
 	}
 }
 
-// copyToClipboard writes s to the OS clipboard via the platform tool (no extra
-// dependency). On Linux this needs xclip or xsel installed.
+// copyToClipboard writes s to the OS clipboard via the platform tool.
 func copyToClipboard(s string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -825,16 +895,12 @@ func saveCmd(rawURL string) tea.Cmd {
 	}
 }
 
-// outputFilename derives a local filename from a result URL — the path's base,
-// with query/fragment dropped — falling back to a generic name.
+// outputFilename derives a local filename from a result URL.
 func outputFilename(rawURL string) string {
 	name := ""
 	if u, err := url.Parse(rawURL); err == nil {
 		name = path.Base(u.Path)
 	}
-	// Reject empties, traversal, dotfiles, and any separator/drive/ADS marker
-	// (\ / :) — a server-controlled URL ending in /.env or carrying C:\ / ..\ must
-	// not escape the cwd or land a hidden file (backslash/colon matter on Windows).
 	if name == "" || name == "." || name == "/" || name == ".." ||
 		strings.HasPrefix(name, ".") || strings.ContainsAny(name, `\/:`) {
 		return "framehood_output"
@@ -845,9 +911,7 @@ func outputFilename(rawURL string) string {
 // maxResultDownloadBytes caps one saved result so a rogue server can't fill the disk.
 const maxResultDownloadBytes = 1 << 30 // 1 GiB
 
-// resultHostAllowed restricts result fetches/opens to our CDN — outputs are always
-// rehosted to *.framehood.ai, so this closes SSRF (e.g. 169.254.169.254) and any
-// non-CDN target a compromised server might return.
+// resultHostAllowed restricts result fetches/opens to our CDN.
 func resultHostAllowed(host string) bool {
 	host = strings.ToLower(host)
 	if i := strings.IndexByte(host, ':'); i >= 0 {
@@ -856,8 +920,7 @@ func resultHostAllowed(host string) bool {
 	return host == "framehood.ai" || strings.HasSuffix(host, ".framehood.ai")
 }
 
-// saveResult downloads rawURL to a non-colliding path in the current directory,
-// returning the written path. It never overwrites an existing file.
+// saveResult downloads rawURL to a non-colliding path in the current directory.
 func saveResult(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
@@ -878,14 +941,10 @@ func saveResult(rawURL string) (string, error) {
 		return "", fmt.Errorf("http %d", resp.StatusCode)
 	}
 
-	// Create exclusively, picking the next free "name", "name-1", … so repeated
-	// saves never clobber an earlier file.
 	f, name, err := createNonColliding(outputFilename(rawURL))
 	if err != nil {
 		return "", err
 	}
-	// Read one byte past the cap so an oversized response fails loudly instead of
-	// silently saving a truncated, corrupt file.
 	n, err := io.Copy(f, io.LimitReader(resp.Body, maxResultDownloadBytes+1))
 	if err != nil {
 		f.Close()
@@ -897,7 +956,7 @@ func saveResult(rawURL string) (string, error) {
 		os.Remove(name)
 		return "", fmt.Errorf("result exceeds %d bytes", maxResultDownloadBytes)
 	}
-	if err := f.Close(); err != nil { // surface the final flush error
+	if err := f.Close(); err != nil {
 		os.Remove(name)
 		return "", err
 	}
@@ -905,7 +964,6 @@ func saveResult(rawURL string) (string, error) {
 }
 
 // createNonColliding O_EXCL-creates the first free of base, base-1, base-2, …
-// in the current directory, returning the open file and its name.
 func createNonColliding(base string) (*os.File, string, error) {
 	ext := path.Ext(base)
 	stem := strings.TrimSuffix(base, ext)

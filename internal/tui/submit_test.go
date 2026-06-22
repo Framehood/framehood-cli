@@ -25,16 +25,18 @@ func findAction(t *testing.T, tool, action string) actionSpec {
 func TestSubmit_GuardsNonRunnable(t *testing.T) {
 	m := newTestModel()
 	m.focus = zoneInput
-	m.action = findAction(t, "image", "edit") // needs image_url → not runnable
+	m.action = findAction(t, "image", "edit") // needs image_url → not runnable, has form
 	m.input.SetValue("make it pop")
 
 	nm, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
 	got := nm.(model)
 	if got.phase == phaseWorking {
-		t.Error("a non-runnable action must not start a job")
+		t.Error("a non-runnable action must not start a job directly from the prompt")
 	}
-	if got.focus != zoneTabs {
-		t.Errorf("should route back to NAV, focus=%v", got.focus)
+	// New behaviour: pressing enter on a form-driven action enters form mode
+	// (rather than routing back to the NAV zone which no longer exists).
+	if len(got.formFields) == 0 {
+		t.Error("enter on form-driven action should open the form (formFields non-empty)")
 	}
 }
 
