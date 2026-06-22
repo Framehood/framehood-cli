@@ -22,7 +22,8 @@ func TestResolveSlashInput_TableDriven(t *testing.T) {
 		{"/balance", "billing·balance", "", true},                      // unique action-name alias
 		{"/billing balance", "billing·balance", "", true},              // full two-token name
 		{"/setdir ~/out", "/setdir", "~/out", true},                    // meta + arg
-		{"/image create a red fox", "image·create", "a red fox", true}, // prompt remainder
+		{"/image create a red fox", "image·create", "a red fox", true},       // prompt remainder
+		{"/image create a  red   fox", "image·create", "a  red   fox", true}, // internal spacing preserved verbatim
 		{"/upgrade", "/upgrade", "", true},
 		{"/logout", "/logout", "", true},
 		{"/history", "/history", "", true},

@@ -145,11 +145,26 @@ func resolveSlashInput(input string) (cmd *paletteCmd, remainder string, ok bool
 		}
 		name := strings.ToLower(strings.Join(fields[:n], " "))
 		if idx, found := commandNames[name]; found {
-			rem := strings.TrimSpace(strings.Join(fields[n:], " "))
-			return &allPaletteCmds[idx], rem, true
+			return &allPaletteCmds[idx], verbatimRemainder(body, n), true
 		}
 	}
 	return nil, "", false
+}
+
+// verbatimRemainder drops the first n whitespace-delimited tokens from body and
+// returns the rest with its internal spacing preserved — so a prompt/arg typed
+// after the command name isn't mangled by re-joining fields.
+func verbatimRemainder(body string, n int) string {
+	rest := body
+	for i := 0; i < n; i++ {
+		rest = strings.TrimLeft(rest, " \t\n")
+		j := strings.IndexAny(rest, " \t\n")
+		if j < 0 {
+			return ""
+		}
+		rest = rest[j:]
+	}
+	return strings.TrimLeft(rest, " \t\n")
 }
 
 // paletteState holds all mutable state for the slash-command palette overlay.
