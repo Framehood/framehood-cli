@@ -21,12 +21,12 @@ type toolResult struct {
 
 // Job is the compact job record returned by the domain tools and get_status.
 type Job struct {
-	ID        string         `json:"job_id"`
-	Kind      string         `json:"kind"`
-	Status    string         `json:"status"`
-	Done      bool           `json:"done"`
-	Outputs   map[string]any `json:"outputs"`
-	StatusURL string         `json:"status_url"`
+	ID        string          `json:"job_id"`
+	Kind      string          `json:"kind"`
+	Status    string          `json:"status"`
+	Done      bool            `json:"done"`
+	Outputs   map[string]any  `json:"outputs"`
+	StatusURL string          `json:"status_url"`
 	Error     json.RawMessage `json:"error"`
 }
 
