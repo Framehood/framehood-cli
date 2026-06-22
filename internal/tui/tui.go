@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/mcp"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -162,6 +164,13 @@ type model struct {
 	histPage int           // current page (0 = newest page)
 	rows     []historyItem // the CURRENT page's items, newest-first; index by hist.Cursor()
 
+	// Output directory for saved results. cfg persists user settings; outputDir
+	// is the resolved absolute dir ("" = current working directory). setdirMode
+	// turns the compose box into a one-field "output directory" prompt.
+	cfg        config.Config
+	outputDir  string
+	setdirMode bool
+
 	notice string // transient action feedback ("copied", "saved → …")
 	width  int
 	height int
@@ -179,9 +188,9 @@ func (m model) generating() bool {
 }
 
 // Run starts the interactive studio. auth wires the `/login` and `/logout`
-// palette commands (may be nil). historyPath is where the local generation
-// history is persisted; "" disables persistence.
-func Run(client *mcp.Client, email string, auth Authenticator, historyPath string) error {
+// palette commands (may be nil). cfg locates the persisted history + settings
+// (output dir); its config dir may be empty, which disables persistence.
+func Run(client *mcp.Client, email string, auth Authenticator, cfg config.Config) error {
 	// The work-action ring is built from the catalog; an empty ring would mean
 	// a broken/empty catalog. Fail clearly rather than index workActions[0].
 	if len(workActions) == 0 {
@@ -198,20 +207,27 @@ func Run(client *mcp.Client, email string, auth Authenticator, historyPath strin
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
 
+	historyPath := ""
+	if cfg.ConfigDir != "" {
+		historyPath = cfg.HistoryPath()
+	}
+
 	m := model{
-		client:   client,
-		auth:     auth,
-		email:    email,
-		loggedIn: client != nil,
-		input:    ti,
-		spin:     sp,
-		help:     help.New(),
-		hist:     newHistoryTable(),
-		action:   workActions[0], // image · create — the first work action
-		keys:     defaultKeys(),
-		focus:    zoneInput, // start ready to type
-		balance:  "…",
-		histPath: historyPath,
+		client:    client,
+		auth:      auth,
+		email:     email,
+		loggedIn:  client != nil,
+		input:     ti,
+		spin:      sp,
+		help:      help.New(),
+		hist:      newHistoryTable(),
+		action:    workActions[0], // image · create — the first work action
+		keys:      defaultKeys(),
+		focus:     zoneInput, // start ready to type
+		balance:   "…",
+		histPath:  historyPath,
+		cfg:       cfg,
+		outputDir: cfg.OutputDir(), // "" = current working directory
 	}
 	// Load past generations so they appear immediately. A missing/corrupt file
 	// loads as empty (loadHistory never errors).
@@ -617,7 +633,7 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 		case "save":
 			if it, ok := m.selectedItem(); ok && it.url != "" {
 				m.notice = styDim.Render("saving…")
-				return m.setFocus(zoneInput), saveCmd(it.url)
+				return m.setFocus(zoneInput), saveCmd(it.url, m.outputDir)
 			}
 			return m.setFocus(zoneInput), nil
 		case "login":
@@ -635,6 +651,8 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 			}
 			m.rebuildHistory(true) // newest page, newest selected
 			return m.setFocus(zoneOutput), nil
+		case "setdir":
+			return m.startSetdir(), nil
 		case "quit":
 			return m, tea.Quit
 		}
@@ -729,7 +747,7 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Save):
 		if it, ok := m.selectedItem(); ok && it.url != "" {
 			m.notice = styDim.Render("saving…")
-			return m, saveCmd(it.url)
+			return m, saveCmd(it.url, m.outputDir)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Use): // chain this result into a new action
@@ -930,6 +948,9 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 // Shift+Tab advances the work-action ring (Tab reverses it).
 // Enter submits with the active action.
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.setdirMode {
+		return m.updateSetdir(msg)
+	}
 	if len(m.formFields) > 0 {
 		return m.updateForm(msg)
 	}
@@ -1197,10 +1218,11 @@ func copyToClipboard(s string) error {
 	return cmd.Run()
 }
 
-// saveCmd downloads the result URL into the current directory, off the UI thread.
-func saveCmd(rawURL string) tea.Cmd {
+// saveCmd downloads the result URL into dir (or the current directory when dir
+// is ""), off the UI thread.
+func saveCmd(rawURL, dir string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := saveResult(rawURL)
+		path, err := saveResult(rawURL, dir)
 		return savedMsg{path: path, err: err}
 	}
 }
@@ -1230,8 +1252,11 @@ func resultHostAllowed(host string) bool {
 	return host == "framehood.ai" || strings.HasSuffix(host, ".framehood.ai")
 }
 
-// saveResult downloads rawURL to a non-colliding path in the current directory.
-func saveResult(rawURL string) (string, error) {
+// saveResult downloads rawURL to a non-colliding path inside dir (or the
+// current working directory when dir is ""). The filename is always derived by
+// the sanitizing outputFilename — dir only changes where the file lands, never
+// the server-controlled basename.
+func saveResult(rawURL, dir string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" || !resultHostAllowed(u.Host) {
 		return "", fmt.Errorf("refusing to fetch a non-Framehood result URL")
@@ -1251,7 +1276,7 @@ func saveResult(rawURL string) (string, error) {
 		return "", fmt.Errorf("http %d", resp.StatusCode)
 	}
 
-	f, name, err := createNonColliding(outputFilename(rawURL))
+	f, name, err := createNonColliding(dir, outputFilename(rawURL))
 	if err != nil {
 		return "", err
 	}
@@ -1274,7 +1299,9 @@ func saveResult(rawURL string) (string, error) {
 }
 
 // createNonColliding O_EXCL-creates the first free of base, base-1, base-2, …
-func createNonColliding(base string) (*os.File, string, error) {
+// inside dir (or the current working directory when dir is ""). base is the
+// already-sanitized filename; dir is the configured output directory.
+func createNonColliding(dir, base string) (*os.File, string, error) {
 	ext := path.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 	for i := 0; i < 1000; i++ {
@@ -1282,9 +1309,13 @@ func createNonColliding(base string) (*os.File, string, error) {
 		if i > 0 {
 			name = fmt.Sprintf("%s-%d%s", stem, i, ext)
 		}
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		full := name
+		if dir != "" {
+			full = filepath.Join(dir, name)
+		}
+		f, err := os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			return f, name, nil
+			return f, full, nil
 		}
 		if !os.IsExist(err) {
 			return nil, "", err
