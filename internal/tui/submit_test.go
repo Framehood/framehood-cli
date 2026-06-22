@@ -124,8 +124,8 @@ func TestSubmit_FormBlocksMissingRequired(t *testing.T) {
 }
 
 // formlessRingActions returns every work-ring action that is neither
-// prompt-runnable nor form-backed — the set that would crash startForm by
-// indexing an empty []paramSpec. Derived from live state so it can't drift.
+// prompt-runnable nor form-backed. After S7 this set MUST be empty — every ring
+// action takes a prompt or opens a form.
 func formlessRingActions() []actionSpec {
 	var out []actionSpec
 	for _, a := range workActions {
@@ -136,71 +136,41 @@ func formlessRingActions() []actionSpec {
 	return out
 }
 
-// TestStartForm_FormlessActionsFailSafe is the regression test for the round-3
-// startForm panic: cycling Shift+Tab (or selecting from the `/` palette) to a
-// ring action that has no prompt path AND no form must NOT panic. startForm
-// must fail safe — set a helpful notice, open no form, and keep input focus.
-func TestStartForm_FormlessActionsFailSafe(t *testing.T) {
-	actions := formlessRingActions()
-	if len(actions) == 0 {
-		t.Fatal("expected some form-less ring actions to exercise the guard")
-	}
-	for _, a := range actions {
-		a := a
-		t.Run(a.tool+"."+a.action, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("startForm(%s·%s) panicked: %v", a.tool, a.action, r)
-				}
-			}()
-			m := newTestModel().startForm(a)
-			if len(m.formFields) != 0 {
-				t.Errorf("%s·%s: form mode should NOT open (got %d fields)",
-					a.tool, a.action, len(m.formFields))
-			}
-			if m.notice == "" {
-				t.Errorf("%s·%s: expected a 'not yet available' notice", a.tool, a.action)
-			}
-			if !strings.Contains(m.notice, "not yet available") {
-				t.Errorf("%s·%s: notice = %q, want it to flag the action as unavailable",
-					a.tool, a.action, m.notice)
-			}
-			if m.focus != zoneInput {
-				t.Errorf("%s·%s: focus = %v, want zoneInput", a.tool, a.action, m.focus)
-			}
-			if m.phase == phaseWorking {
-				t.Errorf("%s·%s: a form-less action must not start a job", a.tool, a.action)
-			}
-		})
+// TestNoFormlessRingActions is the new invariant: no Shift+Tab/Tab action falls
+// through to the "not yet available" fallback — each is runnable or has a form.
+func TestNoFormlessRingActions(t *testing.T) {
+	if leftover := formlessRingActions(); len(leftover) != 0 {
+		var ids []string
+		for _, a := range leftover {
+			ids = append(ids, a.tool+"·"+a.action)
+		}
+		t.Errorf("every work-ring action must take a prompt or a form; still form-less: %v", ids)
 	}
 }
 
-// TestEnterOnFormlessAction_NoPanic exercises the realistic path: the action is
-// active (as if reached via Shift+Tab), the user types something and presses
-// Enter. updateInput routes a non-runnable action to startForm, which must fail
-// safe rather than panic.
-func TestEnterOnFormlessAction_NoPanic(t *testing.T) {
-	for _, a := range formlessRingActions() {
-		a := a
-		t.Run(a.tool+"."+a.action, func(t *testing.T) {
-			m := newTestModel()
-			m.focus = zoneInput
-			m.action = a
-			m.input.SetValue("anything")
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("Enter on %s·%s panicked: %v", a.tool, a.action, r)
-				}
-			}()
-			nm, cmd := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
-			got := nm.(model)
-			if got.phase == phaseWorking || cmd != nil {
-				t.Errorf("%s·%s: must not submit a job", a.tool, a.action)
-			}
-			if got.notice == "" {
-				t.Errorf("%s·%s: expected a notice", a.tool, a.action)
-			}
-		})
+// TestStartForm_FormlessFailSafeGuard keeps regression coverage for the
+// fail-safe guard itself: even though no ring action is form-less anymore, a
+// hypothetical form-less spec passed to startForm must NOT panic — it sets the
+// "not yet available" notice, opens no form, and keeps input focus.
+func TestStartForm_FormlessFailSafeGuard(t *testing.T) {
+	synthetic := actionSpec{tool: "ghost", action: "phantom", kind: kindGenerate, needs: []string{"x"}}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("startForm on a form-less spec panicked: %v", r)
+		}
+	}()
+	m := newTestModel().startForm(synthetic)
+	if len(m.formFields) != 0 {
+		t.Errorf("form mode should NOT open for a form-less spec (got %d fields)", len(m.formFields))
+	}
+	if !strings.Contains(m.notice, "not yet available") {
+		t.Errorf("notice = %q, want it to flag the action as unavailable", m.notice)
+	}
+	if m.focus != zoneInput {
+		t.Errorf("focus = %v, want zoneInput", m.focus)
+	}
+	if m.phase == phaseWorking {
+		t.Error("a form-less spec must not start a job")
 	}
 }
 
