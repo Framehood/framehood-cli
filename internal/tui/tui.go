@@ -136,18 +136,27 @@ type model struct {
 	// compose box (palette closed, input focused). Session-only.
 	inputHist inputHistory
 
-	phase   phase
-	status  string
-	balance string
-	result  string
-	errMsg  string
-	jobID   string
-	started time.Time
-	history []historyItem // chronological (append order)
-	rows    []historyItem // mirrors the table, newest-first; index by hist.Cursor()
-	notice  string        // transient action feedback ("copied", "saved → …")
-	width   int
-	height  int
+	phase    phase
+	status   string
+	balance  string
+	result   string
+	errMsg   string
+	jobID    string
+	genFrame int // animation frame for the "generating" wave; advances each tick
+	started  time.Time
+	history  []historyItem // chronological (append order)
+	rows     []historyItem // mirrors the table, newest-first; index by hist.Cursor()
+	notice   string        // transient action feedback ("copied", "saved → …")
+	width    int
+	height   int
+}
+
+// generating reports whether the working phase has advanced past "submitting"
+// into the actual job (a job_id exists and we're polling). It is the
+// sub-state discriminator for the status animation: false = submitting (request
+// in flight, no job yet), true = generating (job running, lively animation).
+func (m model) generating() bool {
+	return m.phase == phaseWorking && m.jobID != ""
 }
 
 // Run starts the interactive studio. auth wires the `/login` and `/logout`
@@ -424,6 +433,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleLoginResult(msg)
 
 	case spinner.TickMsg:
+		// Advance the generating-wave animation on the same cadence as the
+		// spinner (so we don't schedule a second ticker). Only while actually
+		// generating; submitting keeps the calmer dot spinner.
+		if m.generating() {
+			m.genFrame++
+		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
@@ -569,6 +584,7 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
+		m.genFrame = 0
 		m.inflight = m.action
 		m.inflightLabel = m.action.tool + "·" + m.action.action
 		m.started = time.Now()
@@ -808,6 +824,7 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	m.phase = phaseWorking
 	m.status = "submitting"
 	m.result, m.errMsg, m.jobID = "", "", ""
+	m.genFrame = 0
 	m.inflight = m.action
 	m.inflightLabel = m.formSummary()
 	m.started = time.Now()
@@ -897,6 +914,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
+		m.genFrame = 0
 		m.inflight = m.action
 		m.inflightLabel = prompt
 		m.started = time.Now()

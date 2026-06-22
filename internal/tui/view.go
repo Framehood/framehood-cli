@@ -129,19 +129,7 @@ func (m model) formComposerView(w int, box lipgloss.Style) string {
 func (m model) statusView(w int) string {
 	switch m.phase {
 	case phaseWorking:
-		st := m.status
-		if st == "" {
-			st = "working"
-		}
-		elapsed := time.Since(m.started).Round(time.Second)
-		line := fmt.Sprintf("%s %s %s",
-			styAcc.Render(m.spin.View()),
-			styText.Render(st),
-			styDim.Render("· "+fmtDur(elapsed)))
-		if m.jobID != "" {
-			line += styDim.Render(" · " + m.jobID)
-		}
-		return "\n" + line
+		return "\n" + m.workingView()
 
 	case phaseDone:
 		it, ok := m.selectedItem()
@@ -170,6 +158,40 @@ func (m model) statusView(w int) string {
 		return "\n" + m.notice
 	}
 	return ""
+}
+
+// workingView renders the working phase as one of two visually-distinct states:
+//
+//   - submitting — the request is in flight, no job_id yet. A subtle dot spinner
+//     and a "submitting" label; the brief pre-job moment.
+//   - generating — a job is running and we're polling. A lively marching wave in
+//     the indigo palette, with the provider's status label, elapsed M:SS and the
+//     short job_id.
+func (m model) workingView() string {
+	elapsed := fmtDur(time.Since(m.started).Round(time.Second))
+
+	if !m.generating() {
+		// Submitting: calm dot spinner, no job_id yet.
+		return fmt.Sprintf("%s %s %s",
+			styAcc.Render(m.spin.View()),
+			styText.Render("submitting"),
+			styDim.Render("· "+elapsed))
+	}
+
+	// Generating: the lively wave + provider status + elapsed + job id.
+	status := m.status
+	if status == "" || status == "submitting" {
+		status = "generating"
+	}
+	line := fmt.Sprintf("%s  %s %s %s",
+		genWaveView(m.genFrame),
+		styText.Render("generating"),
+		styDim.Render("· "+status),
+		styDim.Render("· "+elapsed))
+	if m.jobID != "" {
+		line += styDim.Render(" · " + m.jobID)
+	}
+	return line
 }
 
 // historyView: recent generations table (most recent first).

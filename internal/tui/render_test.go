@@ -71,9 +71,13 @@ func TestView_Working_ShowsElapsed(t *testing.T) {
 	m := newTestModel()
 	m.phase = phaseWorking
 	m.status = "running"
+	m.jobID = "job_abc123" // a job exists → the "generating" state shows status
 	m.started = time.Now().Add(-12 * time.Second)
 	out := m.View()
 	if !strings.Contains(out, "running") {
-		t.Error("working view should show status")
+		t.Error("generating view should show the provider status")
+	}
+	if !strings.Contains(out, "0:12") {
+		t.Error("working view should show the elapsed time")
 	}
 }
