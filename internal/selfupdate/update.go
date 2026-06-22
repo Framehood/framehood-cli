@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -32,9 +34,10 @@ var httpClient = &http.Client{Timeout: 5 * time.Minute}
 type Outcome int
 
 const (
-	OutcomeUpToDate Outcome = iota // already on the latest version
-	OutcomeUpgraded                // binary was self-replaced
-	OutcomeManaged                 // managed install — advised, not replaced
+	OutcomeUpToDate   Outcome = iota // already on the latest version
+	OutcomeUpgraded                  // binary was self-replaced
+	OutcomeManaged                   // managed install — advised, not run (PM missing / failed)
+	OutcomeManagedRan                // managed install — the PM upgrade command was run successfully
 )
 
 // Result is the outcome of an Upgrade call.
@@ -43,6 +46,25 @@ type Result struct {
 	From    string // current version
 	To      string // latest version (or current, when up-to-date)
 	Advice  string // for OutcomeManaged: the command/message to show the user
+	Manager string // for OutcomeManaged/OutcomeManagedRan: "Homebrew" or "npm"
+}
+
+// runCommand executes a package-manager upgrade command, streaming its
+// stdout/stderr to the user. It is a package var so tests can inject a stub
+// instead of actually shelling out to brew/npm. The default implementation runs
+// the fixed argv (never a shell string) and reports exec.ErrNotFound-class
+// errors so callers can fall back to advice when the PM isn't installed.
+var runCommand = func(ctx context.Context, name string, args ...string) error {
+	// Resolve up front so a missing binary surfaces as exec.ErrNotFound rather
+	// than a generic start failure — callers distinguish "not installed" to fall
+	// back to advice.
+	if _, err := exec.LookPath(name); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // LatestVersion resolves the latest release tag (e.g. "v1.2.3") via the GitHub
@@ -97,7 +119,7 @@ func Upgrade(ctx context.Context, current string) (Result, error) {
 		exe = resolved
 	}
 	if kind, advice := detectManaged(exe, dirWritable(filepath.Dir(exe))); kind != managedNone {
-		return Result{Outcome: OutcomeManaged, From: current, To: latest, Advice: advice}, nil
+		return runManagedUpgrade(ctx, kind, current, latest, advice), nil
 	}
 
 	asset, err := AssetName(runtime.GOOS, runtime.GOARCH)
@@ -108,6 +130,33 @@ func Upgrade(ctx context.Context, current string) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Outcome: OutcomeUpgraded, From: current, To: latest}, nil
+}
+
+// runManagedUpgrade runs the package-manager upgrade command for a managed
+// install (Homebrew/npm), streaming its output. If the kind has no command
+// (managedOther), or the package-manager binary isn't on PATH, or the command
+// exits non-zero, it falls back to OutcomeManaged carrying the advice string so
+// the user always gets a clear instruction — never a silent failure.
+func runManagedUpgrade(ctx context.Context, kind managedKind, current, latest, advice string) Result {
+	mgr := managerLabel(kind)
+	name, args, ok := pmCommand(kind)
+	if !ok {
+		// No package-manager command for this kind (e.g. managedOther): advise.
+		return Result{Outcome: OutcomeManaged, From: current, To: latest, Advice: advice, Manager: mgr}
+	}
+
+	if err := runCommand(ctx, name, args...); err != nil {
+		// PM binary missing on PATH, or the command failed: fall back to advice so
+		// the user can run it themselves. Annotate why.
+		reason := advice
+		if errors.Is(err, exec.ErrNotFound) {
+			reason = fmt.Sprintf("%s not found on PATH — run:\n  %s %s", name, name, strings.Join(args, " "))
+		} else if advice == "" {
+			reason = fmt.Sprintf("%s %s failed: %v", name, strings.Join(args, " "), err)
+		}
+		return Result{Outcome: OutcomeManaged, From: current, To: latest, Advice: reason, Manager: mgr}
+	}
+	return Result{Outcome: OutcomeManagedRan, From: current, To: latest, Manager: mgr}
 }
 
 // downloadVerifyReplace downloads the asset archive + checksums.txt for the

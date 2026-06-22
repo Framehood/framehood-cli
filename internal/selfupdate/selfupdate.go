@@ -20,6 +20,46 @@ import (
 // Repo is the GitHub "owner/name" the releases are published under.
 const Repo = "Framehood/framehood-cli"
 
+// pkgName is the fixed package identifier passed to the package managers. It is
+// a compile-time constant — never user input — so the exec argv can never be
+// influenced by anything outside this binary.
+const pkgName = "framehood"
+
+// brewFormula is the tap-qualified Homebrew formula name. Qualifying it with the
+// tap (`framehood/tap/framehood`) is unambiguous even when an unrelated
+// `framehood` formula exists in another tap, matching the documented install
+// `brew install framehood/tap/framehood`.
+const brewFormula = "framehood/tap/framehood"
+
+// pmCommand returns the fixed argv (binary + args) for upgrading via the given
+// managed install kind. The returned slice is entirely compile-time constant —
+// it embeds no user input — so callers can exec it directly without shell
+// interpretation. ok is false for kinds that have no package-manager command
+// (managedNone, managedOther), in which case name and args are nil.
+func pmCommand(kind managedKind) (name string, args []string, ok bool) {
+	switch kind {
+	case managedBrew:
+		return "brew", []string{"upgrade", brewFormula}, true
+	case managedNpm:
+		return "npm", []string{"i", "-g", pkgName + "@latest"}, true
+	default:
+		return "", nil, false
+	}
+}
+
+// managerLabel returns a human-readable name for the package manager behind a
+// managed install kind, used in success/fallback messages.
+func managerLabel(kind managedKind) string {
+	switch kind {
+	case managedBrew:
+		return "Homebrew"
+	case managedNpm:
+		return "npm"
+	default:
+		return ""
+	}
+}
+
 // devVersion is the build-time default for an un-released (locally built)
 // binary. It is always treated as "an upgrade is available".
 const devVersion = "dev"
