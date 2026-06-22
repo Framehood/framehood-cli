@@ -34,18 +34,17 @@ func Execute() error {
 		// out (shows a "not signed in" state; /login signs in from inside).
 		RunE: func(cmd *cobra.Command, args []string) error {
 			authn := studioAuth{cfg: cfg}
-			histPath := cfg.HistoryPath()
 			sess, err := NewSession(cfg)
 			if err != nil {
 				// Only a *missing/stale* credential means "launch signed out".
 				// Anything else (corrupted creds, permission error) is a real
 				// failure the user should see, not silently swallow.
 				if errors.Is(err, auth.ErrNotLoggedIn) {
-					return tui.Run(nil, "", authn, histPath)
+					return tui.Run(nil, "", authn, cfg)
 				}
 				return err
 			}
-			return tui.Run(sess.Client(), sess.Email(), authn, histPath)
+			return tui.Run(sess.Client(), sess.Email(), authn, cfg)
 		},
 	}
 
@@ -58,6 +57,7 @@ func Execute() error {
 		newLibraryCmd(cfg),
 		newProjectCmd(cfg),
 		newTeamCmd(cfg),
+		newConfigCmd(cfg),
 	)
 	return root.Execute()
 }

@@ -93,6 +93,12 @@ func (m model) composerView(w int) string {
 	if m.focus == zoneInput && m.phase != phaseWorking && !m.palette.isOpen() {
 		box = styPanelActive
 	}
+	if m.setdirMode {
+		label := styEyebrow.Render("OUTPUT DIRECTORY") +
+			styDim.Render("   enter = set · empty = show current · esc = cancel")
+		field := box.Width(w - 4).Render(m.input.View())
+		return "\n" + label + "\n" + field
+	}
 	if len(m.formFields) > 0 {
 		return m.formComposerView(w, box)
 	}

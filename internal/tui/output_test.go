@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -77,18 +78,46 @@ func TestCreateNonColliding(t *testing.T) {
 		}
 	}()
 
-	f1, n1, err := createNonColliding("clip.mp4")
+	// dir="" → current working directory (we chdir'd into the temp dir above).
+	f1, n1, err := createNonColliding("", "clip.mp4")
 	if err != nil || n1 != "clip.mp4" {
 		t.Fatalf("first = %q err=%v, want clip.mp4", n1, err)
 	}
 	f1.Close()
 	// second save of the same name must NOT clobber → clip-1.mp4
-	f2, n2, err := createNonColliding("clip.mp4")
+	f2, n2, err := createNonColliding("", "clip.mp4")
 	if err != nil || n2 != "clip-1.mp4" {
 		t.Fatalf("second = %q err=%v, want clip-1.mp4", n2, err)
 	}
 	f2.Close()
 	if _, err := os.Stat("clip.mp4"); err != nil {
 		t.Fatal("original clip.mp4 should be untouched")
+	}
+}
+
+// TestCreateNonColliding_RootedInDir verifies the file lands inside the given
+// directory (not the cwd) and collisions are still avoided there.
+func TestCreateNonColliding_RootedInDir(t *testing.T) {
+	dir := t.TempDir()
+
+	f1, n1, err := createNonColliding(dir, "out.png")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	f1.Close()
+	if filepath.Dir(n1) != dir {
+		t.Errorf("file landed in %q, want dir %q", filepath.Dir(n1), dir)
+	}
+	if filepath.Base(n1) != "out.png" {
+		t.Errorf("basename = %q, want out.png", filepath.Base(n1))
+	}
+
+	f2, n2, err := createNonColliding(dir, "out.png")
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	f2.Close()
+	if filepath.Base(n2) != "out-1.png" {
+		t.Errorf("collision name = %q, want out-1.png", filepath.Base(n2))
 	}
 }
