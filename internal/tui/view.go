@@ -45,12 +45,13 @@ func (m model) View() string {
 
 	sel, selOK := m.selectedItem()
 	hc := helpContext{
-		keys:        m.keys,
-		focus:       m.focus,
-		paletteOpen: m.palette.isOpen(),
-		working:     m.phase == phaseWorking,
-		hasResult:   selOK && sel.url != "",
-		hasRows:     len(m.rows) > 0,
+		keys:            m.keys,
+		focus:           m.focus,
+		paletteOpen:     m.palette.isOpen(),
+		working:         m.phase == phaseWorking,
+		hasResult:       selOK && sel.url != "",
+		hasRows:         len(m.rows) > 0,
+		hasInputHistory: len(m.inputHist.entries) > 0,
 	}
 	sections = append(sections, "\n"+m.help.View(hc))
 
