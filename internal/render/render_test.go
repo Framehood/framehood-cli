@@ -97,9 +97,16 @@ func TestReadable_KnownShapes(t *testing.T) {
 			wantContains: []string{"key", "name", "status", "created", "last used", "abcd1234…", "ci", "active", "efgh5678…", "revoked", "2026-06-12"},
 		},
 		{
-			name: "models.list", tool: "models", action: "list",
+			name: "models.list (wrapped object)", tool: "models", action: "list",
 			raw:          `{"models":[{"name":"flux_schnell","category":"image"},{"name":"seedance_r2v","category":"video"}],"total":2}`,
 			wantContains: []string{"model", "category", "flux_schnell", "image", "seedance_r2v", "video", "2 models"},
+		},
+		{
+			// zvs://models (the MCP resource) returns a bare array with richer
+			// fields; the catalog table renders the same name/category columns.
+			name: "models.list (bare array, MCP resource)", tool: "models", action: "list",
+			raw:          `[{"name":"flux_schnell","display_name":"FLUX.1 Schnell","category":"image_gen","cost_per_unit_usd":0},{"name":"seedance_r2v","display_name":"Seedance","category":"video_gen","cost_per_unit_usd":0.4}]`,
+			wantContains: []string{"model", "category", "flux_schnell", "image_gen", "seedance_r2v", "video_gen", "2 models"},
 		},
 		{
 			name: "workflows list", tool: "workflows", action: "",
@@ -147,6 +154,7 @@ func TestReadable_EmptyCollections(t *testing.T) {
 		{"get_status", "list", `{"jobs":[]}`, "No jobs."},
 		{"api_keys", "list", `{"api_keys":[]}`, "No API keys."},
 		{"models", "list", `{"models":[],"total":0}`, "No models."},
+		{"models", "list", `[]`, "No models."}, // bare-array (MCP resource) empty case
 		{"workflows", "", `[]`, "No workflows."},
 	}
 	for _, c := range cases {

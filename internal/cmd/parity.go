@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/render"
@@ -319,9 +321,16 @@ func labelSuffix(name string) string {
 	return " (" + name + ")"
 }
 
-// --- read endpoints: models | skill | workflows (REST GET /v1/...) ---
+// --- catalog reads: models | skill | workflows (MCP zvs:// resources) ---
+//
+// These read the worker's zvs:// MCP resources over /mcp rather than issuing a
+// raw GET against /v1/...: the CLI's stored credential is an OAuth-provider
+// access token that only the OAuthProvider-wrapped /mcp endpoint accepts, so a
+// direct /v1/... GET returns 401 even in a fully logged-in session. Reading the
+// equivalent resource uses the same token + refresh-on-401 as every working
+// command.
 
-// newModelsCmd — the model catalog (GET /v1/models, or one model's full schema).
+// newModelsCmd — the model catalog (zvs://models), or one model's skill.
 func newModelsCmd(cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "models [kind]",
@@ -331,14 +340,14 @@ func newModelsCmd(cfg config.Config) *cobra.Command {
 			"  framehood models flux_schnell",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
-				return getReadable(cmd, cfg, "/v1/models/"+pathSeg(args[0]), "", "")
+				return readReadable(cmd, cfg, "zvs://model/"+pathSeg(args[0]), "skill", "")
 			}
-			return getReadable(cmd, cfg, "/v1/models", "models", "list")
+			return readReadable(cmd, cfg, "zvs://models", "models", "list")
 		},
 	}
 }
 
-// newSkillCmd — a model's skill / prompt guide (GET /v1/models/{kind}/skill).
+// newSkillCmd — a model's skill / prompt guide (zvs://model/{kind}).
 func newSkillCmd(cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "skill <kind>",
@@ -347,13 +356,20 @@ func newSkillCmd(cfg config.Config) *cobra.Command {
 		Example: "  framehood skill flux_schnell\n" +
 			"  framehood skill elevenlabs_tts_v3",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return getReadable(cmd, cfg, "/v1/models/"+pathSeg(args[0])+"/skill", "skill", "")
+			return readReadable(cmd, cfg, "zvs://model/"+pathSeg(args[0]), "skill", "")
 		},
 	}
 }
 
-// newWorkflowsCmd — the multi-step pipeline catalog (GET /v1/workflows), or one
-// workflow's skill.
+// knownWorkflows is the set of multi-step pipelines the worker exposes as
+// zvs://workflow/{name} resources. The MCP surface has no list resource for
+// them (only per-name skills), so the bare `workflows` command reads each one.
+// The server owns the canonical set; this list mirrors the worker's
+// zvs://workflow resource description.
+var knownWorkflows = []string{"video_production", "character_creation", "qa_pipeline"}
+
+// newWorkflowsCmd — the multi-step pipeline catalog, or one workflow's skill
+// (zvs://workflow/{name}).
 func newWorkflowsCmd(cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "workflows [name]",
@@ -363,9 +379,63 @@ func newWorkflowsCmd(cfg config.Config) *cobra.Command {
 			"  framehood workflows video_production",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
-				return getReadable(cmd, cfg, "/v1/workflows/"+pathSeg(args[0])+"/skill", "skill", "")
+				return readReadable(cmd, cfg, "zvs://workflow/"+pathSeg(args[0]), "skill", "")
 			}
-			return getReadable(cmd, cfg, "/v1/workflows", "workflows", "")
+			return runWorkflowsList(cmd, cfg)
 		},
 	}
+}
+
+// runWorkflowsList renders the workflow catalog by reading each known
+// workflow's skill resource and pulling its name + summary line. It builds the
+// {name, description} array shape that render's workflows formatter expects, so
+// the bare `workflows` list looks identical to the previous REST-backed output.
+func runWorkflowsList(cmd *cobra.Command, cfg config.Config) error {
+	sess, err := NewSession(cfg)
+	if err != nil {
+		return err
+	}
+	client := sess.Client()
+	type wf struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	out := make([]wf, 0, len(knownWorkflows))
+	for _, name := range knownWorkflows {
+		raw, err := client.ReadResource(cmd.Context(), "zvs://workflow/"+pathSeg(name))
+		if err != nil {
+			// A missing/renamed workflow must not abort the whole listing; skip it.
+			continue
+		}
+		out = append(out, wf{Name: name, Description: workflowSummary(raw)})
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	if rendered, ok := render.Readable("workflows", "", encoded); ok {
+		fmt.Println(rendered)
+	} else {
+		fmt.Println(render.PrettyJSON(encoded))
+	}
+	return nil
+}
+
+// workflowSummary extracts a one-line description from a workflow skill payload
+// ({name, type, content}): the first non-heading, non-empty markdown line.
+func workflowSummary(raw json.RawMessage) string {
+	var v struct {
+		Content string `json:"content"`
+	}
+	if jsonUnmarshal(raw, &v) != nil {
+		return ""
+	}
+	for _, line := range strings.Split(v.Content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line
+	}
+	return ""
 }

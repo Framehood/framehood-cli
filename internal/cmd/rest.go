@@ -19,17 +19,24 @@ import (
 // result-download ceiling. A larger file is rejected rather than streamed.
 const maxDownloadBytes = 1 << 30 // 1 GiB
 
-// getReadable performs an authenticated GET against a REST path under the API
-// base and prints the response as human-readable text. tool/action select the
-// render formatter; an empty action (or an unknown shape) falls back to pretty
-// JSON so nothing is ever hidden. It mirrors callTool's output convention for
-// the read endpoints that aren't MCP tools (/v1/models, /v1/workflows, …).
-func getReadable(cmd *cobra.Command, cfg config.Config, path, tool, action string) error {
+// readReadable reads an MCP resource (resources/read over /mcp) and prints the
+// response as human-readable text. tool/action select the render formatter; an
+// empty action (or an unknown shape) falls back to pretty JSON so nothing is
+// ever hidden. It mirrors callTool's output convention for the catalog reads
+// (models, workflows, skills).
+//
+// These reads go over /mcp — not a raw GET against /v1/... — because the CLI's
+// credential is an OAuth-provider access token that only the /mcp endpoint
+// (wrapped by the worker's OAuthProvider) accepts; the /v1/... routes are
+// authenticated separately and reject it with a 401. Reading the equivalent
+// zvs:// resource carries the same token and the same refresh-on-401 retry as
+// every working command.
+func readReadable(cmd *cobra.Command, cfg config.Config, uri, tool, action string) error {
 	sess, err := NewSession(cfg)
 	if err != nil {
 		return err
 	}
-	raw, err := sess.Client().GetJSON(cmd.Context(), cfg.APIEndpoint(path))
+	raw, err := sess.Client().ReadResource(cmd.Context(), uri)
 	if err != nil {
 		return err
 	}
@@ -113,8 +120,8 @@ func framehoodHost(host string) bool {
 	return host == "framehood.ai" || strings.HasSuffix(host, ".framehood.ai")
 }
 
-// pathSeg percent-encodes a single URL path segment so a model/workflow name
-// can't break out of the intended /v1/... path.
+// pathSeg percent-encodes a single URL/URI path segment so a model/workflow
+// name can't break out of the intended zvs://model/{name} resource path.
 func pathSeg(s string) string { return url.PathEscape(s) }
 
 // checkLimit validates an explicitly-set --limit against the documented
