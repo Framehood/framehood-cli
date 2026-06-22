@@ -99,9 +99,10 @@ func TestBuildPaletteCmds(t *testing.T) {
 
 	// The read-only immediate allowlist must be exactly cmdImmediate.
 	immediateWant := []string{
-		"billing·balance", "billing·plans", "billing·plan",
+		"billing·balance", "billing·plans", "billing·plan", "billing·transactions",
 		"files·list",
 		"org·info", "org·members", "org·spend",
+		"api_keys·list", "get_status·list",
 	}
 	byID := map[string]paletteCmd{}
 	for _, c := range cmds {
@@ -165,11 +166,13 @@ func TestArgsForImmediateAction(t *testing.T) {
 // immediate=true, and that generation actions do not.
 func TestImmediateFlagAllowlist(t *testing.T) {
 	allowlist := map[string]bool{
-		"billing.balance": true, "billing.plans": true, "billing.plan": true,
+		"billing.balance": true, "billing.plans": true, "billing.plan": true, "billing.transactions": true,
 		"files.list": true,
 		"org.info":   true, "org.members": true, "org.spend": true,
 		"library.trashed": true,
 		"project.list":    true, "project.current": true,
+		"api_keys.list":   true,
+		"get_status.list": true,
 	}
 	for _, g := range catalog {
 		for _, a := range g.actions {
@@ -231,8 +234,12 @@ func TestWorkActionsRing(t *testing.T) {
 	// Actions that MUST NOT be present (service + read).
 	wantAbsent := []string{
 		"billing·balance", "billing·plans", "billing·plan", "billing·subscribe",
-		"org·info", "org·members", "org·spend", "org·invite",
-		"files·list", "files·upload", "get_status·check",
+		"billing·transactions", "billing·change", "billing·preview", "billing·cancel",
+		"org·info", "org·members", "org·spend", "org·invite", "org·accept_invite",
+		"files·list", "files·upload", "files·unpublish", "files·download",
+		"get_status·check", "get_status·list", "get_status·cancel",
+		"project·update",
+		"api_keys·list", "api_keys·create", "api_keys·delete", // service group
 		"actor·list", "actor·get", // kindRead
 	}
 	for _, id := range wantAbsent {

@@ -94,13 +94,19 @@ var catalog = []toolGroup{
 		{"files", "upload", "upload from a URL", kindManage, "", "", []string{"url", "filename"}, false},
 		{"files", "delete", "delete a file", kindManage, "", "", []string{"filename"}, false},
 		{"files", "publish", "make a file public", kindManage, "", "", []string{"filename"}, false},
+		{"files", "unpublish", "make a file private again", kindManage, "", "", []string{"filename"}, false},
+		{"files", "download", "get a URL to fetch a file", kindRead, "", "", []string{"filename"}, false},
 	}},
 	{"billing", "Credits & plan", []actionSpec{
-		{"billing", "balance", "credit balance", kindRead, "", "", nil, true}, // immediate
-		{"billing", "plans", "available plans", kindRead, "", "", nil, true},  // immediate
-		{"billing", "plan", "current plan", kindRead, "", "", nil, true},      // immediate
+		{"billing", "balance", "credit balance", kindRead, "", "", nil, true},            // immediate
+		{"billing", "plans", "available plans", kindRead, "", "", nil, true},             // immediate
+		{"billing", "plan", "current plan", kindRead, "", "", nil, true},                 // immediate
+		{"billing", "transactions", "recent credit ledger", kindRead, "", "", nil, true}, // immediate
 		{"billing", "manage", "manage subscription", kindRead, "", "", nil, false},
 		{"billing", "subscribe", "subscribe to a plan", kindManage, "", "", []string{"step"}, false},
+		{"billing", "preview", "preview a plan change", kindManage, "", "", []string{"step"}, false},
+		{"billing", "change", "switch to another package", kindManage, "", "", []string{"step"}, false},
+		{"billing", "cancel", "cancel at period end (or reactivate)", kindManage, "", "", nil, false},
 		{"billing", "request_upgrade", "ask the owner to upgrade", kindManage, "", "", nil, false},
 	}},
 	{"org", "Organization", []actionSpec{
@@ -108,6 +114,7 @@ var catalog = []toolGroup{
 		{"org", "members", "list members", kindRead, "", "", nil, true},   // immediate
 		{"org", "spend", "spend report", kindRead, "", "", nil, true},     // immediate
 		{"org", "invite", "invite a member", kindManage, "", "", []string{"email"}, false},
+		{"org", "accept_invite", "join an org with a token", kindManage, "", "", []string{"token"}, false},
 		{"org", "remove", "remove a member", kindManage, "", "", []string{"email"}, false},
 	}},
 	{"library", "Library", []actionSpec{
@@ -120,12 +127,20 @@ var catalog = []toolGroup{
 		{"project", "list", "list your projects", kindRead, "", "", nil, true},         // immediate
 		{"project", "current", "show the active project", kindRead, "", "", nil, true}, // immediate
 		{"project", "create", "create a project", kindManage, "", "", []string{"name"}, false},
+		{"project", "update", "rename / change a project", kindManage, "", "", []string{"id"}, false},
 		{"project", "use", "set the active project", kindManage, "", "", nil, false},
 		{"project", "assign", "put an asset in a project", kindManage, "", "", []string{"asset_id"}, false},
 		{"project", "delete", "delete a project", kindManage, "", "", []string{"id"}, false},
 	}},
-	{"get_status", "Job status", []actionSpec{
+	{"api_keys", "API keys", []actionSpec{
+		{"api_keys", "list", "list your API keys", kindRead, "", "", nil, true}, // immediate
+		{"api_keys", "create", "mint a new key (shown once)", kindManage, "", "", nil, false},
+		{"api_keys", "delete", "revoke a key", kindManage, "", "", []string{"key"}, false},
+	}},
+	{"get_status", "Jobs", []actionSpec{
 		{"get_status", "check", "check a job by id", kindRead, "", "", []string{"job_id"}, false},
+		{"get_status", "list", "your generation history", kindRead, "", "", nil, true}, // immediate
+		{"get_status", "cancel", "cancel a running job", kindManage, "", "", []string{"job_id"}, false},
 	}},
 }
 
@@ -155,6 +170,7 @@ const (
 	pTextList                   // comma-separated free-text values → []string (e.g. prompts)
 	pNumber                     // an optional integer (omitted when empty / non-numeric)
 	pJSON                       // a JSON object (a non-JSON value is wrapped as {"text": …})
+	pBool                       // a boolean — true/yes/1/y/on → true, false/no/0/n/off → false
 )
 
 type paramSpec struct {
@@ -214,6 +230,18 @@ var actionForms = map[string][]paramSpec{
 	"library.list":    {opt("query", "search query (optional)", pText), opt("type", "type: image | video | audio", pText), opt("project", "project id (optional)", pText)},
 	"library.trash":   {req("id", "asset id to trash", pText)},
 	"library.restore": {req("id", "asset id to restore", pText)},
+
+	// Parity service actions (billing / files / org / project / api_keys / jobs).
+	"project.update":    {req("id", "project id", pText), opt("name", "new name (optional)", pText), opt("visibility", "visibility: personal | shared", pText), opt("description", "new description (optional)", pText)},
+	"billing.preview":   {req("step", "package id (from billing plans)", pText)},
+	"billing.change":    {req("step", "package id (from billing plans)", pText)},
+	"billing.cancel":    {opt("reactivate", "reactivate? true to resume, blank to cancel at period end", pBool)},
+	"files.unpublish":   {req("filename", "file key to make private", pText)},
+	"files.download":    {req("filename", "file key to fetch", pText)},
+	"org.accept_invite": {req("token", "invite token", pText)},
+	"api_keys.create":   {opt("name", "label (optional)", pText)},
+	"api_keys.delete":   {req("key", "key prefix or full value", pText)},
+	"get_status.cancel": {req("job_id", "job id to cancel", pText)},
 }
 
 func (a actionSpec) form() []paramSpec { return actionForms[a.tool+"."+a.action] }
@@ -241,6 +269,13 @@ func argsForForm(spec actionSpec, vals map[string]string) (string, map[string]an
 			}
 		case pJSON:
 			args[f.name] = parseJSONField(v)
+		case pBool:
+			// The MCP tool expects a real boolean, not the string "true". Only
+			// forward an unambiguous value; an unrecognized one is dropped so the
+			// action falls back to its server-side default.
+			if b, ok := parseBoolField(v); ok {
+				args[f.name] = b
+			}
 		default:
 			args[f.name] = v
 		}
@@ -272,4 +307,16 @@ func parseJSONField(v string) any {
 		return obj
 	}
 	return map[string]any{"text": v}
+}
+
+// parseBoolField parses a form value into a boolean. ok=false for an
+// unrecognized value so the caller can drop the field (server default applies).
+func parseBoolField(v string) (val, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "yes", "y", "1", "on":
+		return true, true
+	case "false", "no", "n", "0", "off":
+		return false, true
+	}
+	return false, false
 }
