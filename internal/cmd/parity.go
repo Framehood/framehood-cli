@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/mcp"
@@ -281,12 +283,10 @@ func downloadPrivateViaPublish(cmd *cobra.Command, client *mcp.Client, token, ke
 		return fmt.Errorf("could not publish %q to download it: %w", key, err)
 	}
 	publicURL := downloadURLFrom(pubRaw)
-	// Always restore the file to private, regardless of how the fetch goes.
-	defer func() {
-		if _, uerr := client.CallTool(cmd.Context(), "files", map[string]any{"action": "unpublish", "filename": key}); uerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not unpublish %q after download — it may still be public: %v\n", key, uerr)
-		}
-	}()
+	// Once the file is published, it MUST be restored to private no matter how the
+	// rest of the function exits — so register the restore in a defer before doing
+	// anything that can fail or block.
+	defer restorePrivate(cmd.Context(), client, key)
 	if publicURL == "" {
 		return fmt.Errorf("no public URL returned when publishing %q:\n%s", key, render.PrettyJSON(pubRaw))
 	}
@@ -295,6 +295,21 @@ func downloadPrivateViaPublish(cmd *cobra.Command, client *mcp.Client, token, ke
 	}
 	fmt.Printf("✓ saved → %s\n", out)
 	return nil
+}
+
+// restorePrivate unpublishes key, moving a transiently-published file back to
+// private. It deliberately runs on a context DETACHED from parent (via
+// WithoutCancel): the restore must complete even if the parent context was
+// cancelled (ctrl-c / timeout mid-download) — otherwise a cancelled download
+// would leave the file PUBLIC. A short timeout still bounds the call so it can't
+// hang forever. A failure is reported (never silently swallowed) but not
+// returned, since this runs in a defer after the primary result is decided.
+func restorePrivate(parent context.Context, client *mcp.Client, key string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 30*time.Second)
+	defer cancel()
+	if _, err := client.CallTool(ctx, "files", map[string]any{"action": "unpublish", "filename": key}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not unpublish %q after download — it may still be public: %v\n", key, err)
+	}
 }
 
 // --- keys (api_keys: list | create | delete) ---

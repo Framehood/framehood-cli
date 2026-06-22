@@ -158,3 +158,35 @@ func TestBuildGenerateArgs_VideoEditRefArray(t *testing.T) {
 		t.Fatalf("reference_images not threaded as []any: %v", args["reference_images"])
 	}
 }
+
+// TestBuildGenerateArgs_RejectsBlankInputs verifies a present-but-empty input is
+// rejected exactly like a missing one — a whitespace-only --video-url and an
+// all-blank --clips must not satisfy the required-input checks.
+func TestBuildGenerateArgs_RejectsBlankInputs(t *testing.T) {
+	// lipsync with a blank video URL → still "missing", must error.
+	blank := mediaInputs{videoURL: "   ", audioURL: "https://cdn.framehood.ai/v.mp3"}
+	if _, _, err := buildGenerateArgs("video", "lipsync", "", "", "", "", "", "", blank); err == nil {
+		t.Fatal("expected error for a whitespace-only --video-url")
+	}
+	// assemble with only blank/empty clip entries → no usable clips, must error.
+	blankClips := mediaInputs{clips: []string{"", "   "}}
+	if _, _, err := buildGenerateArgs("video", "assemble", "", "", "", "", "", "", blankClips); err == nil {
+		t.Fatal("expected error when every --clips entry is blank")
+	}
+}
+
+// TestBuildGenerateArgs_TrimsInputs verifies surrounding whitespace is stripped
+// from URLs before they reach the tool args.
+func TestBuildGenerateArgs_TrimsInputs(t *testing.T) {
+	media := mediaInputs{
+		videoURL: "  https://cdn.framehood.ai/in.mp4  ",
+		audioURL: "\thttps://cdn.framehood.ai/v.mp3\n",
+	}
+	_, args, err := buildGenerateArgs("video", "lipsync", "", "", "", "", "", "", media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["video_url"] != "https://cdn.framehood.ai/in.mp4" || args["audio_url"] != "https://cdn.framehood.ai/v.mp3" {
+		t.Fatalf("inputs were not trimmed: %v", args)
+	}
+}

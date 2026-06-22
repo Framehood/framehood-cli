@@ -189,13 +189,18 @@ func newGenerateCmd(cfg config.Config) *cobra.Command {
 			"  framehood generate --type video --action lipsync --video-url … --audio-url …\n" +
 			"  framehood generate --type video --action assemble --clips a.mp4,b.mp4 --audio-url vo.mp3",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sess, err := NewSession(cfg)
+			prompt := strings.Join(args, " ")
+
+			// Validate and assemble the tool args FIRST — before opening a session
+			// (which may hit the network to refresh the token) or making any tool
+			// call. A bad invocation (e.g. lipsync without --audio-url) fails fast
+			// with a clear CLI error and never touches the network.
+			tool, toolArgs, err := buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice, media)
 			if err != nil {
 				return err
 			}
-			prompt := strings.Join(args, " ")
 
-			tool, toolArgs, err := buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice, media)
+			sess, err := NewSession(cfg)
 			if err != nil {
 				return err
 			}
@@ -252,10 +257,39 @@ type mediaInputs struct {
 	tracks    []string
 }
 
+// normalized trims surrounding whitespace from every URL and drops blank
+// entries (e.g. from `--clips a.mp4,,` or a stray `--image-url ""`), so the
+// required-input checks in the builders can't be fooled by a present-but-empty
+// value. The scalar fields collapse a whitespace-only value to "".
+func (m mediaInputs) normalized() mediaInputs {
+	return mediaInputs{
+		videoURL:  strings.TrimSpace(m.videoURL),
+		audioURL:  strings.TrimSpace(m.audioURL),
+		imageURLs: nonEmptyTrimmed(m.imageURLs),
+		clips:     nonEmptyTrimmed(m.clips),
+		tracks:    nonEmptyTrimmed(m.tracks),
+	}
+}
+
+// nonEmptyTrimmed trims each element and returns only the non-blank ones.
+func nonEmptyTrimmed(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // buildGenerateArgs maps a generation type to an MCP tool name and argument map,
 // folding in any input-media URLs (media) the pipeline actions consume. The arg
 // names match the worker tool schemas (worker/src/tools/{image,audio,video}.ts).
 func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice string, media mediaInputs) (string, map[string]any, error) {
+	// Drop blank/whitespace-only URLs up front so required-input validation can't
+	// be satisfied by an empty value.
+	media = media.normalized()
+	prompt = strings.TrimSpace(prompt)
 	switch strings.ToLower(kind) {
 	case "image":
 		return buildImageArgs(action, prompt, out, tier, format, actorID, media)

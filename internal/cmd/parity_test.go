@@ -139,6 +139,35 @@ func TestRunFileDownload_PrivatePublishesAndRestores(t *testing.T) {
 	}
 }
 
+// TestRestorePrivate_RunsAfterParentCancelled is the regression guard for the
+// cancel-mid-download leak: the restore (unpublish) of a transiently-published
+// file must still reach the server even when the parent context is ALREADY
+// cancelled (ctrl-c / timeout mid-download) — otherwise a cancelled download
+// would leave the file PUBLIC. restorePrivate detaches via WithoutCancel.
+func TestRestorePrivate_RunsAfterParentCancelled(t *testing.T) {
+	fts := &filesToolServer{}
+	srv := httptest.NewServer(fts.handler())
+	defer srv.Close()
+
+	cfg := testSessionConfig(t, srv.URL)
+	sess, err := NewSession(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A parent context that is cancelled BEFORE the restore runs — exactly the
+	// mid-download ctrl-c case. A naive client.CallTool(parent, …) would fail with
+	// "context canceled" and never reach the server.
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	restorePrivate(parent, sess.Client(), "clip.mp4")
+
+	if len(fts.actions) != 1 || fts.actions[0] != "unpublish" {
+		t.Fatalf("restore must unpublish despite the cancelled parent context; actions = %v", fts.actions)
+	}
+}
+
 // TestRunFileDownload_PrivateNoOutPrintsPayload verifies that without -o a
 // private file does NOT publish (no state mutation) — it just prints the
 // payload, leaving the file untouched.
