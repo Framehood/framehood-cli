@@ -49,6 +49,17 @@ type historyItem struct {
 	prompt string
 	url    string
 	failed bool
+	at     time.Time // when the generation completed (for persistence + display)
+}
+
+// toPersisted / fromPersisted convert between the in-memory item and its
+// on-disk form.
+func (h historyItem) toPersisted() persistedEntry {
+	return persistedEntry{Time: h.at, Kind: h.kind, Prompt: h.prompt, URL: h.url, Failed: h.failed}
+}
+
+func fromPersisted(e persistedEntry) historyItem {
+	return historyItem{kind: e.Kind, prompt: e.Prompt, url: e.URL, failed: e.Failed, at: e.Time}
 }
 
 // composerPlaceholder is the prompt-box hint shown in the default (non-form)
@@ -144,12 +155,20 @@ type model struct {
 	jobID    string
 	genFrame int // animation frame for the "generating" wave; advances each tick
 	started  time.Time
-	history  []historyItem // chronological (append order)
-	rows     []historyItem // mirrors the table, newest-first; index by hist.Cursor()
-	notice   string        // transient action feedback ("copied", "saved → …")
-	width    int
-	height   int
+	history  []historyItem // chronological (append order); ALL entries
+
+	// Paginated RECENT view over `history` (displayed newest-first).
+	histPath string        // history.json path; "" disables persistence (tests)
+	histPage int           // current page (0 = newest page)
+	rows     []historyItem // the CURRENT page's items, newest-first; index by hist.Cursor()
+
+	notice string // transient action feedback ("copied", "saved → …")
+	width  int
+	height int
 }
+
+// histPageSize is the number of generation rows shown per RECENT page.
+const histPageSize = 6
 
 // generating reports whether the working phase has advanced past "submitting"
 // into the actual job (a job_id exists and we're polling). It is the
@@ -160,8 +179,9 @@ func (m model) generating() bool {
 }
 
 // Run starts the interactive studio. auth wires the `/login` and `/logout`
-// palette commands; it may be nil (those commands then report unavailable).
-func Run(client *mcp.Client, email string, auth Authenticator) error {
+// palette commands (may be nil). historyPath is where the local generation
+// history is persisted; "" disables persistence.
+func Run(client *mcp.Client, email string, auth Authenticator, historyPath string) error {
 	// The work-action ring is built from the catalog; an empty ring would mean
 	// a broken/empty catalog. Fail clearly rather than index workActions[0].
 	if len(workActions) == 0 {
@@ -191,7 +211,15 @@ func Run(client *mcp.Client, email string, auth Authenticator) error {
 		keys:     defaultKeys(),
 		focus:    zoneInput, // start ready to type
 		balance:  "…",
+		histPath: historyPath,
 	}
+	// Load past generations so they appear immediately. A missing/corrupt file
+	// loads as empty (loadHistory never errors).
+	for _, e := range loadHistory(historyPath) {
+		m.history = append(m.history, fromPersisted(e))
+	}
+	m.rebuildHistory(true)
+
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
@@ -216,9 +244,18 @@ func newHistoryTable() table.Model {
 	return t
 }
 
-// rebuildHistory refreshes the table rows (newest first) and the parallel
-// `rows` slice used to resolve the selection. selectNewest moves the cursor to
-// the newest row (job completion); otherwise the current selection is preserved.
+// historyPages is the total number of RECENT pages (at least 1).
+func (m model) historyPages() int {
+	if len(m.history) == 0 {
+		return 1
+	}
+	return (len(m.history) + histPageSize - 1) / histPageSize
+}
+
+// rebuildHistory refreshes the table with the CURRENT page of `history`
+// (displayed newest-first) and the parallel `rows` slice used to resolve the
+// selection. selectNewest jumps to page 0 and selects the newest row (a fresh
+// generation); otherwise the page and in-page selection are preserved (clamped).
 func (m *model) rebuildHistory(selectNewest bool) {
 	prev := m.hist.Cursor()
 	cols := tableWidth(m.width)
@@ -227,20 +264,35 @@ func (m *model) rebuildHistory(selectNewest bool) {
 		{Title: "type", Width: 7},
 		{Title: "prompt", Width: cols},
 	})
-	rows := make([]table.Row, 0, len(m.history))
-	items := make([]historyItem, 0, len(m.history))
-	for i := len(m.history) - 1; i >= 0; i-- {
-		h := m.history[i]
-		dot := "●"
+
+	pages := m.historyPages()
+	if selectNewest {
+		m.histPage = 0
+	}
+	if m.histPage < 0 {
+		m.histPage = 0
+	}
+	if m.histPage >= pages {
+		m.histPage = pages - 1
+	}
+
+	// The newest-first display index range for this page.
+	lo, hi := m.pageBounds()
+
+	rows := make([]table.Row, 0, hi-lo)
+	items := make([]historyItem, 0, hi-lo)
+	for d := lo; d < hi; d++ {
+		h := m.history[len(m.history)-1-d] // d-th newest
 		items = append(items, h)
-		rows = append(rows, table.Row{dot, h.kind, truncate(h.prompt, cols-1)})
+		rows = append(rows, table.Row{"●", h.kind, truncate(h.prompt, cols-1)})
 	}
 	m.rows = items
 	m.hist.SetRows(rows)
+
 	if len(rows) > 0 {
 		switch {
 		case selectNewest:
-			m.hist.SetCursor(0) // newest
+			m.hist.SetCursor(0) // newest on page 0
 		case prev >= len(rows):
 			m.hist.SetCursor(len(rows) - 1)
 		case prev < 0:
@@ -250,13 +302,27 @@ func (m *model) rebuildHistory(selectNewest bool) {
 		}
 	}
 	h := len(rows)
-	if h > 6 {
-		h = 6
+	if h > histPageSize {
+		h = histPageSize
 	}
 	if h < 1 {
 		h = 1
 	}
 	m.hist.SetHeight(h + 1) // + header
+}
+
+// pageBounds returns the [lo, hi) newest-first display indices covered by the
+// current page (lo inclusive, hi exclusive; 0 = the newest entry).
+func (m model) pageBounds() (int, int) {
+	lo := m.histPage * histPageSize
+	hi := lo + histPageSize
+	if hi > len(m.history) {
+		hi = len(m.history)
+	}
+	if lo > len(m.history) {
+		lo = len(m.history)
+	}
+	return lo, hi
 }
 
 func tableWidth(w int) int {
@@ -560,6 +626,15 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 			return m.runLogout()
 		case "whoami":
 			return m.runWhoami()
+		case "history":
+			// Focus the RECENT view at the newest page so the user can page
+			// through all persisted generations with ⇞/⇟ + o/c/s/u.
+			if len(m.history) == 0 {
+				m.notice = styDim.Render("no generations yet")
+				return m.setFocus(zoneInput), nil
+			}
+			m.rebuildHistory(true) // newest page, newest selected
+			return m.setFocus(zoneOutput), nil
 		case "quit":
 			return m, tea.Quit
 		}
@@ -616,6 +691,22 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Up), key.Matches(msg, m.keys.Down):
 		m.notice = ""
 		m.hist, _ = m.hist.Update(msg)
+		return m, nil
+	case key.Matches(msg, m.keys.PageOlder): // pgdn → older page
+		m.notice = ""
+		if m.histPage < m.historyPages()-1 {
+			m.histPage++
+			m.hist.SetCursor(0) // newest row on the new page
+			m.rebuildHistory(false)
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.PageNewer): // pgup → newer page
+		m.notice = ""
+		if m.histPage > 0 {
+			m.histPage--
+			m.hist.SetCursor(0)
+			m.rebuildHistory(false)
+		}
 		return m, nil
 	case key.Matches(msg, m.keys.Open):
 		if it, ok := m.selectedItem(); ok && it.url != "" {
@@ -980,16 +1071,44 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 	if j.Status == "failed" {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
-		m.history = append(m.history, historyItem{kind: label, prompt: prompt, failed: true})
+		m.history = capHistory(append(m.history, historyItem{kind: label, prompt: prompt, failed: true, at: time.Now()}))
 		m.rebuildHistory(true)
-		return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
+		return m.setFocus(zoneOutput), tea.Batch(loadBalanceCmd(m.client), m.saveHistoryCmd())
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.notice = ""
-	m.history = append(m.history, historyItem{kind: label, prompt: prompt, url: m.result})
+	m.history = capHistory(append(m.history, historyItem{kind: label, prompt: prompt, url: m.result, at: time.Now()}))
 	m.rebuildHistory(true)
-	return m.setFocus(zoneOutput), loadBalanceCmd(m.client)
+	return m.setFocus(zoneOutput), tea.Batch(loadBalanceCmd(m.client), m.saveHistoryCmd())
+}
+
+// capHistory keeps the in-memory generation history bounded to the same limit as
+// the persisted file, so a long session can't grow it without bound.
+func capHistory(h []historyItem) []historyItem {
+	if len(h) > maxPersistedHistory {
+		return h[len(h)-maxPersistedHistory:]
+	}
+	return h
+}
+
+// saveHistoryCmd persists the current generation history off the UI thread.
+// Persistence is best-effort: a write error is swallowed (returns a no-op msg)
+// so it can never crash or block the studio. A no-op when persistence is off.
+func (m model) saveHistoryCmd() tea.Cmd {
+	if m.histPath == "" {
+		return nil
+	}
+	// Snapshot the entries so the goroutine doesn't race the model.
+	entries := make([]persistedEntry, len(m.history))
+	for i, h := range m.history {
+		entries[i] = h.toPersisted()
+	}
+	path := m.histPath
+	return func() tea.Msg {
+		_ = saveHistory(path, entries) // best-effort; never surfaced
+		return nil
+	}
 }
 
 // --- commands ---

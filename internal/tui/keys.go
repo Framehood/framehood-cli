@@ -27,12 +27,14 @@ type keyMap struct {
 	HistNext key.Binding // ↓ — recall newer / restore draft
 
 	// Output quick-keys (history pane)
-	Up   key.Binding // ↑/k — move history selection
-	Down key.Binding // ↓/j
-	Open key.Binding // o — open selected result in browser
-	Copy key.Binding // c — copy URL to clipboard
-	Save key.Binding // s — save to disk
-	Use  key.Binding // u — chain result into next action
+	Up        key.Binding // ↑/k — move history selection
+	Down      key.Binding // ↓/j
+	PageOlder key.Binding // pgdn — older page of history
+	PageNewer key.Binding // pgup — newer page of history
+	Open      key.Binding // o — open selected result in browser
+	Copy      key.Binding // c — copy URL to clipboard
+	Save      key.Binding // s — save to disk
+	Use       key.Binding // u — chain result into next action
 
 	// Global
 	Help      key.Binding // ? — toggle full help
@@ -56,12 +58,14 @@ func defaultKeys() keyMap {
 		HistPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑↓", "history")),
 		HistNext: key.NewBinding(key.WithKeys("down")),
 
-		Up:   key.NewBinding(key.WithKeys("up", "k")),
-		Down: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↑↓", "select")),
-		Open: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open")),
-		Copy: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy url")),
-		Save: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "save")),
-		Use:  key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "use as input")),
+		Up:        key.NewBinding(key.WithKeys("up", "k")),
+		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↑↓", "select")),
+		PageOlder: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("⇟", "older")),
+		PageNewer: key.NewBinding(key.WithKeys("pgup"), key.WithHelp("⇞", "newer")),
+		Open:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open")),
+		Copy:      key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy url")),
+		Save:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "save")),
+		Use:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "use as input")),
 
 		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		ForceQuit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
