@@ -38,9 +38,13 @@ var metaCmds = []paletteCmd{
 }
 
 // buildPaletteCmds flattens catalog + meta into the full command list.
-// Each catalog action maps to cmdNeedsPrompt (runnable) or cmdNeedsForm
-// (has an actionForms entry) or is skipped if neither (pure read-only with no
-// form yet — user can chain from output quick keys instead).
+//
+// Routing rules (in priority order):
+//  1. spec.immediate  → cmdImmediate: executes right away, no user input needed.
+//  2. spec.hasForm()  → cmdNeedsForm: opens the per-parameter form flow.
+//  3. spec.runnable() → cmdNeedsPrompt: closes palette, user types a prompt + enter.
+//  4. fallback        → cmdNeedsPrompt: non-form, non-runnable (e.g. get_status·check
+//     which needs a job_id typed by the user).
 func buildPaletteCmds() []paletteCmd {
 	var cmds []paletteCmd
 	cmds = append(cmds, metaCmds...)
@@ -51,13 +55,13 @@ func buildPaletteCmds() []paletteCmd {
 			id := a.tool + "·" + a.action
 			title := a.tool + " " + a.action
 			switch {
-			case a.runnable():
-				cmds = append(cmds, paletteCmd{id: id, title: title, spec: a, kind: cmdNeedsPrompt})
+			case a.immediate:
+				// No suffix — runs without any further input.
+				cmds = append(cmds, paletteCmd{id: id, title: title, spec: a, kind: cmdImmediate})
 			case a.hasForm():
+				// The › suffix is part of the title; truncation must keep it.
 				cmds = append(cmds, paletteCmd{id: id, title: title + " ›", spec: a, kind: cmdNeedsForm})
 			default:
-				// Immediate read actions (list, balance, etc.) — execute via existing
-				// prompt-empty path: set action + auto-submit with no prompt.
 				cmds = append(cmds, paletteCmd{id: id, title: title, spec: a, kind: cmdNeedsPrompt})
 			}
 		}
@@ -174,6 +178,18 @@ const (
 	paletteCellTotal = paletteCellInner + paletteCellPad*2 + 2 // +2 for border chars
 )
 
+// truncateRunes truncates s to at most n runes, appending "…" if cut.
+// Unlike truncate() in view.go which uses byte length, this counts runes so
+// multi-byte characters (e.g. "›") don't cause off-by-one wrapping inside
+// lipgloss cells.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
 var (
 	styPaletteCell = lipgloss.NewStyle().
 			Width(paletteCellInner).
@@ -239,7 +255,7 @@ func (p *paletteState) View(width int) string {
 		var cells []string
 		for i := start; i < end; i++ {
 			cmd := &allPaletteCmds[p.matches[i]]
-			title := truncate(cmd.title, paletteCellInner)
+			title := truncateRunes(cmd.title, paletteCellInner)
 			if i == p.sel {
 				cells = append(cells, styPaletteSel.Render(title))
 			} else {

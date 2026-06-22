@@ -461,35 +461,26 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 	m.action = *cmd.spec
 
 	switch cmd.kind {
+	case cmdImmediate:
+		// Read-only, no-required-arg action — submit immediately without prompting.
+		if !m.loggedIn {
+			m.phase = phaseError
+			m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+			return m.setFocus(zoneOutput), nil
+		}
+		m.phase = phaseWorking
+		m.status = "submitting"
+		m.result, m.errMsg, m.jobID = "", "", ""
+		m.inflight = m.action
+		m.inflightLabel = m.action.tool + "·" + m.action.action
+		m.started = time.Now()
+		// Immediate actions have no promptField; build minimal args directly.
+		tool, args := argsForImmediateAction(m.action)
+		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 	case cmdNeedsForm:
 		return m.startForm(*cmd.spec), nil
-	case cmdNeedsPrompt:
+	default: // cmdNeedsPrompt
 		m.formFields = nil
-		m.input.Placeholder = "Describe what to create…"
-		return m.setFocus(zoneInput), nil
-	default: // cmdImmediate for read-type actions (e.g. billing·balance)
-		// For truly immediate read-only actions (promptField == ""), try to
-		// auto-submit with an empty prompt by delegating to the existing submit
-		// guard. If it's not runnable we leave the action set and let the user
-		// know they may need a form.
-		if cmd.spec.runnable() {
-			// Some actions like billing.balance need no prompt — we submit
-			// immediately with an empty string and let the server handle it.
-			if !m.loggedIn {
-				m.phase = phaseError
-				m.errMsg = "You're not signed in. Quit and run `framehood login` first."
-				return m.setFocus(zoneOutput), nil
-			}
-			m.phase = phaseWorking
-			m.status = "submitting"
-			m.result, m.errMsg, m.jobID = "", "", ""
-			m.inflight = m.action
-			m.inflightLabel = m.action.tool + "·" + m.action.action
-			m.started = time.Now()
-			tool, args := argsForAction(m.action, "")
-			return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
-		}
-		// Has a form — shouldn't reach here but fall back safely.
 		m.input.Placeholder = "Describe what to create…"
 		return m.setFocus(zoneInput), nil
 	}
