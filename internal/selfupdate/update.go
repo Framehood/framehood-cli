@@ -254,7 +254,7 @@ func extractFromTarGz(archivePath, binName string) ([]byte, error) {
 			return nil, err
 		}
 		if filepath.Base(hdr.Name) == binName && hdr.Typeflag == tar.TypeReg {
-			return io.ReadAll(io.LimitReader(tr, maxDownloadBytes+1))
+			return readCapped(tr, binName)
 		}
 	}
 	return nil, fmt.Errorf("%s not found in archive", binName)
@@ -273,10 +273,23 @@ func extractFromZip(archivePath, binName string) ([]byte, error) {
 				return nil, err
 			}
 			defer rc.Close()
-			return io.ReadAll(io.LimitReader(rc, maxDownloadBytes+1))
+			return readCapped(rc, binName)
 		}
 	}
 	return nil, fmt.Errorf("%s not found in archive", binName)
+}
+
+// readCapped reads up to maxDownloadBytes and fails if the entry is larger, so a
+// decompression bomb in the archive can't yield a truncated binary we'd install.
+func readCapped(r io.Reader, name string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxDownloadBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxDownloadBytes {
+		return nil, fmt.Errorf("extracted %s exceeds %d bytes", name, maxDownloadBytes)
+	}
+	return data, nil
 }
 
 // replaceExecutable atomically replaces the binary at exePath with newBin. It

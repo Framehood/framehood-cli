@@ -176,6 +176,8 @@ type model struct {
 
 	// version is the build-time CLI version, used by the /upgrade command.
 	version string
+	// upgrading guards against concurrent /upgrade self-replace attempts.
+	upgrading bool
 
 	notice string // transient action feedback ("copied", "saved → …")
 	width  int

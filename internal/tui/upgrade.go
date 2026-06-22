@@ -17,6 +17,11 @@ type upgradeResultMsg struct {
 // runUpgrade handles the `/upgrade` palette command: it runs the self-update
 // off the Bubble Tea UI thread and reports a notice while it works.
 func (m model) runUpgrade() (tea.Model, tea.Cmd) {
+	if m.upgrading {
+		m.notice = styDim.Render("upgrade already in progress…")
+		return m.setFocus(zoneInput), nil
+	}
+	m.upgrading = true
 	m.notice = styDim.Render("checking for updates…")
 	return m.setFocus(zoneInput), upgradeCmd(m.version)
 }
@@ -33,6 +38,7 @@ func upgradeCmd(version string) tea.Cmd {
 
 // handleUpgradeResult turns the upgrade outcome into a studio notice.
 func (m model) handleUpgradeResult(msg upgradeResultMsg) (tea.Model, tea.Cmd) {
+	m.upgrading = false
 	if msg.err != nil {
 		m.notice = styRed.Render("upgrade failed: " + msg.err.Error())
 		return m, nil
