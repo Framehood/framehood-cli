@@ -57,18 +57,24 @@ func PrettyJSON(raw json.RawMessage) string {
 type formatter func(raw json.RawMessage) (string, bool)
 
 var formatters = map[string]formatter{
-	"org.info":        fmtOrgInfo,
-	"org.members":     fmtOrgMembers,
-	"org.spend":       fmtOrgSpend,
-	"org.trend":       fmtOrgTrend,
-	"billing.balance": fmtBillingBalance,
-	"billing.plan":    fmtBillingPlan,
-	"billing.plans":   fmtBillingPlans,
-	"files.list":      fmtFilesList,
-	"library.list":    fmtLibraryList,
-	"library.trashed": fmtLibraryList,
-	"project.list":    fmtProjectList,
-	"project.current": fmtProjectCurrent,
+	"org.info":             fmtOrgInfo,
+	"org.members":          fmtOrgMembers,
+	"org.spend":            fmtOrgSpend,
+	"org.trend":            fmtOrgTrend,
+	"billing.balance":      fmtBillingBalance,
+	"billing.plan":         fmtBillingPlan,
+	"billing.plans":        fmtBillingPlans,
+	"billing.transactions": fmtBillingTransactions,
+	"files.list":           fmtFilesList,
+	"library.list":         fmtLibraryList,
+	"library.trashed":      fmtLibraryList,
+	"project.list":         fmtProjectList,
+	"project.current":      fmtProjectCurrent,
+	"get_status.list":      fmtJobsList,
+	"api_keys.list":        fmtAPIKeysList,
+	"models.list":          fmtModelsList,
+	"workflows.":           fmtWorkflowsList,
+	"skill.":               fmtSkill,
 }
 
 // --- org ---
@@ -252,6 +258,40 @@ func fmtBillingPlans(raw json.RawMessage) (string, bool) {
 	return table([]string{"plan", "credits"}, rows), true
 }
 
+// billing.transactions → {transactions:[{amount, transaction_type, model_display,
+// model, units, unit_credits, description, created_at}]}. Credits only — the
+// worker never selects cost_usd / unit_cost_usd, so the markup stays hidden.
+func fmtBillingTransactions(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Transactions []struct {
+			Amount          *float64 `json:"amount"`
+			TransactionType string   `json:"transaction_type"`
+			Model           string   `json:"model"`
+			ModelDisplay    string   `json:"model_display"`
+			Description     string   `json:"description"`
+			CreatedAt       string   `json:"created_at"`
+		} `json:"transactions"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Transactions == nil {
+		return "", false
+	}
+	if len(v.Transactions) == 0 {
+		return "No transactions.", true
+	}
+	rows := make([][]string, 0, len(v.Transactions))
+	for _, t := range v.Transactions {
+		desc := t.Description
+		if desc == "" {
+			desc = t.ModelDisplay
+		}
+		if desc == "" {
+			desc = t.Model
+		}
+		rows = append(rows, []string{shortTime(t.CreatedAt), orDash(t.TransactionType), credits(t.Amount), truncate(desc, 40)})
+	}
+	return table([]string{"when", "type", "credits", "description"}, rows), true
+}
+
 // --- files ---
 
 // files.list → {files:[{key, size, uploaded}], truncated}
@@ -366,6 +406,134 @@ func fmtProjectCurrent(raw json.RawMessage) (string, bool) {
 type projectShape struct {
 	Name       string `json:"name"`
 	Visibility string `json:"visibility"`
+}
+
+// --- jobs (get_status.list) ---
+
+// get_status.list → {jobs:[{job_id, kind, status, created_at}], next_cursor}.
+// The generation-history feed. Cost is intentionally omitted (credits-only
+// surface elsewhere; the feed shows what ran, not what it cost).
+func fmtJobsList(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Jobs []struct {
+			JobID     string `json:"job_id"`
+			Kind      string `json:"kind"`
+			Status    string `json:"status"`
+			CreatedAt string `json:"created_at"`
+		} `json:"jobs"`
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Jobs == nil {
+		return "", false
+	}
+	if len(v.Jobs) == 0 {
+		return "No jobs.", true
+	}
+	rows := make([][]string, 0, len(v.Jobs))
+	for _, j := range v.Jobs {
+		rows = append(rows, []string{orDash(j.JobID), orDash(j.Kind), orDash(j.Status), shortTime(j.CreatedAt)})
+	}
+	out := table([]string{"job id", "kind", "status", "when"}, rows)
+	if v.NextCursor != "" {
+		out += "\n…more — list again with --cursor " + v.NextCursor
+	}
+	return out, true
+}
+
+// --- api_keys ---
+
+// api_keys.list → {api_keys:[{api_key (prefix…), name, created_at, last_used_at,
+// is_active}]}. The displayed api_key is a non-secret prefix hint, never the
+// full secret (that is shown once at create time).
+func fmtAPIKeysList(raw json.RawMessage) (string, bool) {
+	var v struct {
+		APIKeys []struct {
+			APIKey     string `json:"api_key"`
+			Name       string `json:"name"`
+			CreatedAt  string `json:"created_at"`
+			LastUsedAt string `json:"last_used_at"`
+			IsActive   *bool  `json:"is_active"`
+		} `json:"api_keys"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.APIKeys == nil {
+		return "", false
+	}
+	if len(v.APIKeys) == 0 {
+		return "No API keys.", true
+	}
+	rows := make([][]string, 0, len(v.APIKeys))
+	for _, k := range v.APIKeys {
+		status := "active"
+		if k.IsActive != nil && !*k.IsActive {
+			status = "revoked"
+		}
+		rows = append(rows, []string{orDash(k.APIKey), orDash(k.Name), status, shortTime(k.CreatedAt), shortTime(k.LastUsedAt)})
+	}
+	return table([]string{"key", "name", "status", "created", "last used"}, rows), true
+}
+
+// --- models / workflows / skill (REST read endpoints) ---
+
+// models.list → {models:[{name, category}], total}. The model catalog.
+func fmtModelsList(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Models []struct {
+			Name     string `json:"name"`
+			Category string `json:"category"`
+		} `json:"models"`
+		Total *int `json:"total"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Models == nil {
+		return "", false
+	}
+	if len(v.Models) == 0 {
+		return "No models.", true
+	}
+	rows := make([][]string, 0, len(v.Models))
+	for _, m := range v.Models {
+		rows = append(rows, []string{orDash(m.Name), orDash(m.Category)})
+	}
+	out := table([]string{"model", "category"}, rows)
+	if v.Total != nil {
+		out += fmt.Sprintf("\n%s", plural(*v.Total, "model"))
+	}
+	return out, true
+}
+
+// workflows → [{name, description, skill_url}] (a bare array). The pipeline catalog.
+func fmtWorkflowsList(raw json.RawMessage) (string, bool) {
+	var v []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", false
+	}
+	if len(v) == 0 {
+		return "No workflows.", true
+	}
+	rows := make([][]string, 0, len(v))
+	for _, w := range v {
+		rows = append(rows, []string{orDash(w.Name), truncate(w.Description, 56)})
+	}
+	return table([]string{"workflow", "description"}, rows), true
+}
+
+// skill → {name, type, content} (model/workflow skill) or {model, prompt_guide}
+// (the prompt-guide endpoint). Markdown/text content is printed as-is.
+func fmtSkill(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &v); err == nil && v.Content != "" {
+		head := ""
+		if v.Name != "" {
+			head = v.Name + "\n\n"
+		}
+		return head + strings.TrimSpace(v.Content), true
+	}
+	return "", false
 }
 
 // --- shared rendering helpers ---

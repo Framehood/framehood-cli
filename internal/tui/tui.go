@@ -84,6 +84,7 @@ var serviceTools = map[string]bool{
 	"get_status": true,
 	"library":    true,
 	"project":    true,
+	"api_keys":   true,
 }
 
 // workActions is the ordered ring Shift+Tab cycles through: every

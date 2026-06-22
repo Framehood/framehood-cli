@@ -81,6 +81,36 @@ func TestReadable_KnownShapes(t *testing.T) {
 			raw:          `{"project":{"name":"Campaign Q3","visibility":"shared"}}`,
 			wantContains: []string{"Active project: Campaign Q3", "Visibility: shared"},
 		},
+		{
+			name: "billing.transactions", tool: "billing", action: "transactions",
+			raw:          `{"transactions":[{"amount":1000,"transaction_type":"subscription_grant","model_display":"","description":"Monthly allowance","created_at":"2026-06-20T09:00:00Z"},{"amount":200,"transaction_type":"refund","model":"flux_schnell","description":"","created_at":"2026-06-19T09:00:00Z"}]}`,
+			wantContains: []string{"when", "type", "credits", "description", "subscription_grant", "1000 credits", "Monthly allowance", "refund", "flux_schnell", "2026-06-20"},
+		},
+		{
+			name: "get_status.list", tool: "get_status", action: "list",
+			raw:          `{"jobs":[{"job_id":"j1","kind":"flux_schnell","status":"succeeded","created_at":"2026-06-20T09:00:00Z"}],"next_cursor":"c2"}`,
+			wantContains: []string{"job id", "kind", "status", "when", "j1", "flux_schnell", "succeeded", "2026-06-20", "--cursor c2"},
+		},
+		{
+			name: "api_keys.list", tool: "api_keys", action: "list",
+			raw:          `{"api_keys":[{"api_key":"abcd1234…","name":"ci","created_at":"2026-06-20T09:00:00Z","last_used_at":null,"is_active":true},{"api_key":"efgh5678…","name":"old","created_at":"2026-06-10T09:00:00Z","last_used_at":"2026-06-12T09:00:00Z","is_active":false}]}`,
+			wantContains: []string{"key", "name", "status", "created", "last used", "abcd1234…", "ci", "active", "efgh5678…", "revoked", "2026-06-12"},
+		},
+		{
+			name: "models.list", tool: "models", action: "list",
+			raw:          `{"models":[{"name":"flux_schnell","category":"image"},{"name":"seedance_r2v","category":"video"}],"total":2}`,
+			wantContains: []string{"model", "category", "flux_schnell", "image", "seedance_r2v", "video", "2 models"},
+		},
+		{
+			name: "workflows list", tool: "workflows", action: "",
+			raw:          `[{"name":"video_production","description":"end-to-end video","skill_url":"/v1/workflows/video_production/skill"}]`,
+			wantContains: []string{"workflow", "description", "video_production", "end-to-end video"},
+		},
+		{
+			name: "skill (model)", tool: "skill", action: "",
+			raw:          `{"name":"flux_schnell","type":"model","content":"# Flux Schnell\n\nFast text-to-image."}`,
+			wantContains: []string{"flux_schnell", "Flux Schnell", "Fast text-to-image."},
+		},
 	}
 	for _, c := range cases {
 		c := c
@@ -113,6 +143,11 @@ func TestReadable_EmptyCollections(t *testing.T) {
 		{"library", "list", `{"items":[],"total":0}`, "No assets."},
 		{"project", "list", `{"projects":[]}`, "No projects."},
 		{"project", "current", `{"project":null}`, "No active project."},
+		{"billing", "transactions", `{"transactions":[]}`, "No transactions."},
+		{"get_status", "list", `{"jobs":[]}`, "No jobs."},
+		{"api_keys", "list", `{"api_keys":[]}`, "No API keys."},
+		{"models", "list", `{"models":[],"total":0}`, "No models."},
+		{"workflows", "", `[]`, "No workflows."},
 	}
 	for _, c := range cases {
 		out, ok := Readable(c.tool, c.action, json.RawMessage(c.raw))

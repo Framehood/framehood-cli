@@ -96,8 +96,38 @@ func newProjectCmd(cfg config.Config) *cobra.Command {
 	}
 	create.Flags().BoolVar(&shared, "shared", false, "Visible to the whole org (default: personal)")
 	create.Flags().StringVar(&desc, "desc", "", "Project description")
+
+	var upName, upVis, upDesc string
+	update := &cobra.Command{
+		Use:   "update <project-id>",
+		Short: "Change a project's name, visibility or description (owner only)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a := map[string]any{"action": "update", "id": args[0]}
+			// Only send the fields the user actually set, so unchanged fields
+			// keep their server-side values.
+			if cmd.Flags().Changed("name") {
+				a["name"] = upName
+			}
+			if cmd.Flags().Changed("visibility") {
+				a["visibility"] = upVis
+			}
+			if cmd.Flags().Changed("description") {
+				a["description"] = upDesc
+			}
+			if len(a) == 2 {
+				return fmt.Errorf("nothing to update — set --name, --visibility and/or --description")
+			}
+			return callTool(cmd, cfg, "project", a)
+		},
+	}
+	update.Flags().StringVar(&upName, "name", "", "New project name")
+	update.Flags().StringVar(&upVis, "visibility", "", "New visibility: personal | shared")
+	update.Flags().StringVar(&upDesc, "description", "", "New description")
+
 	cmd.AddCommand(
 		create,
+		update,
 		&cobra.Command{Use: "delete <project-id>", Short: "Delete a project (its assets stay in the library)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			return callTool(cmd, cfg, "project", map[string]any{"action": "delete", "id": args[0]})
 		}},
@@ -160,6 +190,9 @@ func newTeamCmd(cfg config.Config) *cobra.Command {
 		}},
 		&cobra.Command{Use: "invite <email>", Short: "Invite a member by email (owner only)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			return callTool(cmd, cfg, "org", map[string]any{"action": "invite", "email": args[0]})
+		}},
+		&cobra.Command{Use: "accept-invite <token>", Short: "Join an org with an invite token", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+			return callTool(cmd, cfg, "org", map[string]any{"action": "accept_invite", "token": args[0]})
 		}},
 		&cobra.Command{Use: "remove <email>", Short: "Remove a member (owner only)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			return callTool(cmd, cfg, "org", map[string]any{"action": "remove", "email": args[0]})

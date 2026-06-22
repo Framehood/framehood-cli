@@ -75,7 +75,27 @@ framehood generate --type video "a drone shot over a coastline"
 | `--voice` | — | voice name for `audio` speak |
 
 `generate` submits the job and polls until it finishes, then prints the output
-URL. Other commands: `framehood balance`, `framehood whoami`.
+URL.
+
+### Other one-shot commands
+
+The CLI mirrors the full MCP/REST surface — every command renders human-readable
+output (no raw JSON dumps):
+
+| Command | What it does |
+|---------|--------------|
+| `framehood whoami` · `framehood balance` | your account / credit balance |
+| `framehood billing <balance\|plan\|plans\|transactions>` | credits, plan, and the credit ledger |
+| `framehood billing <preview\|change> <package>` · `billing cancel [--reactivate]` | owner-only subscription changes |
+| `framehood jobs [list]` · `framehood jobs cancel <id>` | generation history; cancel a running job |
+| `framehood files <list\|upload\|delete\|publish\|unpublish\|download>` | manage your storage (`download -o <path>` writes to disk) |
+| `framehood project <list\|create\|update\|delete\|assign\|use\|current>` | group generations into projects |
+| `framehood team …` · `framehood team accept-invite <token>` | your organization: members, spend, roles, invites |
+| `framehood keys <list\|create\|delete>` | programmatic API keys (the secret is shown once on create) |
+| `framehood models [kind]` · `framehood skill <kind>` · `framehood workflows [name]` | the model catalog, a model's prompt guide, and multi-step workflows |
+| `framehood library …` | search past generations and manage the trash |
+
+Run `framehood <command> --help` for the flags on each.
 
 ## Studio (interactive)
 
@@ -93,6 +113,7 @@ framehood
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `FRAMEHOOD_MCP_BASE` | `https://mcp.framehood.ai` | MCP + OAuth origin |
+| `FRAMEHOOD_API_BASE` | (the MCP base) | REST origin for the `/v1/…` read endpoints (`models`, `workflows`) |
 | `FRAMEHOOD_CONFIG_DIR` | `~/.framehood` | credentials/state directory |
 
 ## Docs
