@@ -5,10 +5,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -196,5 +200,87 @@ func TestDirWritable(t *testing.T) {
 	}
 	if dirWritable(filepath.Join(t.TempDir(), "does-not-exist")) {
 		t.Error("a missing dir should report not writable")
+	}
+}
+
+// withRunCommand swaps the package-level runCommand stub for the duration of a
+// test, restoring it afterward.
+func withRunCommand(t *testing.T, fn func(ctx context.Context, name string, args ...string) error) {
+	t.Helper()
+	orig := runCommand
+	runCommand = fn
+	t.Cleanup(func() { runCommand = orig })
+}
+
+// TestRunManagedUpgrade_SuccessDoesNotClaimVersion covers finding 3: a clean PM
+// exit only proves the command ran. The result must NOT carry a To version (the
+// formula/npm index can lag the GitHub release).
+func TestRunManagedUpgrade_SuccessDoesNotClaimVersion(t *testing.T) {
+	var gotName string
+	var gotArgs []string
+	withRunCommand(t, func(_ context.Context, name string, args ...string) error {
+		gotName, gotArgs = name, args
+		return nil
+	})
+
+	res := runManagedUpgrade(context.Background(), managedBrew, "v1.0.0", "v2.0.0", "advice")
+	if res.Outcome != OutcomeManagedRan {
+		t.Fatalf("outcome = %d, want OutcomeManagedRan", res.Outcome)
+	}
+	if res.To != "" {
+		t.Errorf("To = %q, want empty (a clean PM exit does not confirm the version landed)", res.To)
+	}
+	if res.From != "v1.0.0" {
+		t.Errorf("From = %q, want v1.0.0", res.From)
+	}
+	if res.Manager != "Homebrew" {
+		t.Errorf("Manager = %q, want Homebrew", res.Manager)
+	}
+	// It ran the tap-qualified formula, not the bare name.
+	if gotName != "brew" || strings.Join(gotArgs, " ") != "upgrade "+brewFormula {
+		t.Errorf("ran %q %v, want brew upgrade %s", gotName, gotArgs, brewFormula)
+	}
+}
+
+// TestRunManagedUpgrade_FailureAdviceFromAttemptedArgv covers finding 2: when
+// the PM command fails, the fallback advice must reflect the argv actually run
+// (brew upgrade framehood/tap/framehood), not the generic detector hint.
+func TestRunManagedUpgrade_FailureAdviceFromAttemptedArgv(t *testing.T) {
+	withRunCommand(t, func(_ context.Context, _ string, _ ...string) error {
+		return errors.New("exit status 1")
+	})
+
+	// The detector advice deliberately uses the un-qualified `brew upgrade
+	// framehood`; the attempted argv uses the tap-qualified formula. The fallback
+	// must carry the latter.
+	res := runManagedUpgrade(context.Background(), managedBrew,
+		"v1.0.0", "v2.0.0", "this looks like a Homebrew install — run:\n  brew upgrade framehood")
+	if res.Outcome != OutcomeManaged {
+		t.Fatalf("outcome = %d, want OutcomeManaged (fallback)", res.Outcome)
+	}
+	if !strings.Contains(res.Advice, "brew upgrade "+brewFormula) {
+		t.Errorf("advice = %q, want it to mention the attempted `brew upgrade %s`", res.Advice, brewFormula)
+	}
+	if !strings.Contains(res.Advice, "failed") {
+		t.Errorf("advice = %q, want it to note the command failed", res.Advice)
+	}
+}
+
+// TestRunManagedUpgrade_NotFoundAdvice: when the PM binary isn't on PATH, the
+// advice still shows the attempted argv so the user can run it once installed.
+func TestRunManagedUpgrade_NotFoundAdvice(t *testing.T) {
+	withRunCommand(t, func(_ context.Context, _ string, _ ...string) error {
+		return exec.ErrNotFound
+	})
+
+	res := runManagedUpgrade(context.Background(), managedNpm, "v1.0.0", "v2.0.0", "advice")
+	if res.Outcome != OutcomeManaged {
+		t.Fatalf("outcome = %d, want OutcomeManaged", res.Outcome)
+	}
+	if !strings.Contains(res.Advice, "npm i -g "+pkgName+"@latest") {
+		t.Errorf("advice = %q, want the attempted npm argv", res.Advice)
+	}
+	if !strings.Contains(res.Advice, "not found on PATH") {
+		t.Errorf("advice = %q, want a 'not found on PATH' note", res.Advice)
 	}
 }

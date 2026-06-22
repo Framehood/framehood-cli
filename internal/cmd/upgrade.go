@@ -31,6 +31,8 @@ func newUpgradeCmd() *cobra.Command {
 				cmd.Printf("Already on the latest (%s)\n", displayVersion(res.To))
 			case selfupdate.OutcomeUpgraded:
 				cmd.Printf("Upgraded %s → %s\n", displayVersion(res.From), displayVersion(res.To))
+			case selfupdate.OutcomeManagedRan:
+				cmd.Printf("%s upgrade command completed — restart framehood to confirm the new version\n", res.Manager)
 			case selfupdate.OutcomeManaged:
 				cmd.Printf("A newer version (%s) is available, but %s\n", displayVersion(res.To), res.Advice)
 			}

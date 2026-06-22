@@ -135,16 +135,19 @@ func TestParseChecksum_MissingAndMalformed(t *testing.T) {
 }
 
 func TestDetectManaged_Brew(t *testing.T) {
-	paths := []string{
+	// Genuine brew installs: the bin/framehood symlink resolves (after
+	// EvalSymlinks) into a Cellar dir, which is the ownership signal → owned.
+	ownedPaths := []string{
 		"/opt/homebrew/Cellar/framehood/1.2.3/bin/framehood",
 		"/usr/local/Cellar/framehood/1.2.3/bin/framehood",
-		"/home/linuxbrew/.linuxbrew/bin/framehood",
-		"/opt/homebrew/bin/framehood",
 	}
-	for _, p := range paths {
-		kind, advice := detectManaged(p, true) // dir writable, but brew path → managed
+	for _, p := range ownedPaths {
+		kind, conf, advice := detectManaged(p, true)
 		if kind != managedBrew {
 			t.Errorf("detectManaged(%q) kind = %d, want managedBrew", p, kind)
+		}
+		if conf != confidenceOwned {
+			t.Errorf("detectManaged(%q) confidence = %d, want confidenceOwned (Cellar owns it)", p, conf)
 		}
 		if !strings.Contains(advice, "brew upgrade framehood") {
 			t.Errorf("brew advice for %q = %q, want it to mention `brew upgrade framehood`", p, advice)
@@ -152,11 +155,33 @@ func TestDetectManaged_Brew(t *testing.T) {
 	}
 }
 
+func TestDetectManaged_BrewBinDirNotOwned(t *testing.T) {
+	// A self-built binary merely COPIED into a Homebrew/linuxbrew bin dir, with
+	// no Cellar in the resolved path: brew doesn't own it. Detection must be weak
+	// so the caller falls back to self-update/advice instead of `brew upgrade`.
+	weakPaths := []string{
+		"/opt/homebrew/bin/framehood",
+		"/home/linuxbrew/.linuxbrew/bin/framehood",
+	}
+	for _, p := range weakPaths {
+		kind, conf, _ := detectManaged(p, true)
+		if kind != managedBrew {
+			t.Errorf("detectManaged(%q) kind = %d, want managedBrew", p, kind)
+		}
+		if conf != confidenceWeak {
+			t.Errorf("detectManaged(%q) confidence = %d, want confidenceWeak (bin dir, no Cellar)", p, conf)
+		}
+	}
+}
+
 func TestDetectManaged_Npm(t *testing.T) {
 	p := "/usr/local/lib/node_modules/framehood/bin/framehood"
-	kind, advice := detectManaged(p, true)
+	kind, conf, advice := detectManaged(p, true)
 	if kind != managedNpm {
 		t.Errorf("npm path kind = %d, want managedNpm", kind)
+	}
+	if conf != confidenceOwned {
+		t.Errorf("npm confidence = %d, want confidenceOwned (node_modules owns it)", conf)
 	}
 	if !strings.Contains(advice, "npm i -g framehood@latest") {
 		t.Errorf("npm advice = %q, want it to mention the npm command", advice)
@@ -165,9 +190,12 @@ func TestDetectManaged_Npm(t *testing.T) {
 
 func TestDetectManaged_NonWritableDir(t *testing.T) {
 	// A plain path, but the dir isn't writable → advise, don't self-replace.
-	kind, advice := detectManaged("/usr/bin/framehood", false)
+	kind, conf, advice := detectManaged("/usr/bin/framehood", false)
 	if kind != managedOther {
 		t.Errorf("non-writable dir kind = %d, want managedOther", kind)
+	}
+	if conf != confidenceOwned {
+		t.Errorf("non-writable confidence = %d, want confidenceOwned (advise, no PM auto-exec)", conf)
 	}
 	if !strings.Contains(advice, "releases/latest") {
 		t.Errorf("non-writable advice = %q, want a releases link", advice)
@@ -176,9 +204,12 @@ func TestDetectManaged_NonWritableDir(t *testing.T) {
 
 func TestDetectManaged_SelfManaged(t *testing.T) {
 	// A normal, writable install dir → safe to self-replace.
-	kind, advice := detectManaged("/home/user/.local/bin/framehood", true)
+	kind, conf, advice := detectManaged("/home/user/.local/bin/framehood", true)
 	if kind != managedNone {
 		t.Errorf("self-managed kind = %d, want managedNone", kind)
+	}
+	if conf != confidenceNone {
+		t.Errorf("self-managed confidence = %d, want confidenceNone", conf)
 	}
 	if advice != "" {
 		t.Errorf("self-managed advice = %q, want empty", advice)

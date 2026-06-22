@@ -48,6 +48,10 @@ func (m model) handleUpgradeResult(msg upgradeResultMsg) (tea.Model, tea.Cmd) {
 		m.notice = styGreen.Render("already on the latest (" + msg.res.To + ")")
 	case selfupdate.OutcomeUpgraded:
 		m.notice = styGreen.Render("upgraded " + msg.res.From + " → " + msg.res.To + " · restart to use it")
+	case selfupdate.OutcomeManagedRan:
+		// The PM command ran, but the installed version isn't confirmed (the
+		// formula/npm index can lag the release), so don't claim a version.
+		m.notice = styGreen.Render(msg.res.Manager + " upgrade command completed · restart to confirm the new version")
 	case selfupdate.OutcomeManaged:
 		m.notice = styAcc.Render("update available (" + msg.res.To + "): " + msg.res.Advice)
 	}

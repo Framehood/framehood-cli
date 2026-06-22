@@ -69,6 +69,15 @@ func TestHandleUpgradeResult_Notices(t *testing.T) {
 		t.Errorf("managed notice = %q, want it to carry the advice", n)
 	}
 
+	// managed-ran → the PM command completed, but we must NOT claim a version
+	// landed (the formula/npm index can lag the release).
+	nm, _ = m.handleUpgradeResult(upgradeResultMsg{
+		res: selfupdate.Result{Outcome: selfupdate.OutcomeManagedRan, From: "v1.2.0", Manager: "Homebrew"},
+	})
+	if n := nm.(model).notice; !strings.Contains(n, "Homebrew") || !strings.Contains(n, "restart to confirm") {
+		t.Errorf("managed-ran notice = %q, want it to mention the manager and 'restart to confirm'", n)
+	}
+
 	// error
 	nm, _ = m.handleUpgradeResult(upgradeResultMsg{err: errors.New("network down")})
 	if n := nm.(model).notice; !strings.Contains(n, "upgrade failed") || !strings.Contains(n, "network down") {
