@@ -207,21 +207,52 @@ const (
 	managedOther                    // some other managed/non-writable install
 )
 
+// managedConfidence describes how strongly the path evidence supports running
+// the package manager. Only confidenceOwned justifies auto-executing brew/npm —
+// a mere bin-dir match (confidenceWeak) could be a self-managed binary that was
+// simply copied next to a package-managed one, so we must not hand it to the PM.
+type managedConfidence int
+
+const (
+	confidenceNone  managedConfidence = iota // no managed signal
+	confidenceWeak                           // bin-dir match only — do NOT auto-exec the PM
+	confidenceOwned                          // ownership signal (Cellar/node_modules) — safe to auto-exec
+)
+
 // detectManaged inspects an already-resolved (symlinks evaluated) executable
-// path and reports whether the install is package-manager-managed and the
-// advice to print. dirWritable reports whether the binary's directory is
-// writable (callers pass the real check; tests pass a stub).
-func detectManaged(resolvedExe string, dirWritable bool) (managedKind, string) {
+// path and reports whether the install is package-manager-managed, how confident
+// that classification is, and the advice to print. dirWritable reports whether
+// the binary's directory is writable (callers pass the real check; tests pass a
+// stub).
+//
+// Confidence matters because the path-only signals differ in strength:
+//   - An OWNERSHIP signal (a Homebrew Cellar dir, or an npm node_modules root)
+//     means the package manager genuinely installed the binary — auto-running
+//     `brew upgrade` / `npm i -g` is correct.
+//   - A WEAK signal (the binary merely lives in a Homebrew/npm *bin* dir, with
+//     no Cellar/node_modules in the resolved path) could just be a self-built
+//     binary someone copied there. brew/npm don't own it, so running them would
+//     fail or upgrade the wrong thing; callers must fall back to self-update (if
+//     the dir is writable) or advice instead.
+func detectManaged(resolvedExe string, dirWritable bool) (managedKind, managedConfidence, string) {
 	lower := strings.ToLower(filepath.ToSlash(resolvedExe))
 	switch {
-	case strings.Contains(lower, "/cellar/") || strings.Contains(lower, "/homebrew/") || strings.Contains(lower, "/.linuxbrew/"):
-		return managedBrew, "this looks like a Homebrew install — run:\n  brew upgrade framehood"
+	// Homebrew ownership: the real brew bin/framehood symlinks into
+	// …/Cellar/framehood/<ver>/bin/…, so after EvalSymlinks a genuine brew
+	// install resolves under a Cellar dir.
+	case strings.Contains(lower, "/cellar/"):
+		return managedBrew, confidenceOwned, "this looks like a Homebrew install — run:\n  brew upgrade framehood"
+	// npm ownership: the global install lives under …/node_modules/framehood/.
 	case strings.Contains(lower, "/node_modules/framehood/"):
-		return managedNpm, "this looks like the npm wrapper — run:\n  npm i -g framehood@latest"
+		return managedNpm, confidenceOwned, "this looks like the npm wrapper — run:\n  npm i -g framehood@latest"
+	// Weak Homebrew signal: under a Homebrew/linuxbrew prefix (e.g. a bin dir)
+	// but NOT resolved into a Cellar. brew may not own this binary.
+	case strings.Contains(lower, "/homebrew/") || strings.Contains(lower, "/.linuxbrew/"):
+		return managedBrew, confidenceWeak, "this looks like a Homebrew install — run:\n  brew upgrade framehood"
 	case !dirWritable:
-		return managedOther, "the binary's directory isn't writable — re-download from\n  https://github.com/" + Repo + "/releases/latest"
+		return managedOther, confidenceOwned, "the binary's directory isn't writable — re-download from\n  https://github.com/" + Repo + "/releases/latest"
 	}
-	return managedNone, ""
+	return managedNone, confidenceNone, ""
 }
 
 // CurrentPlatform returns the asset name for the running platform.
