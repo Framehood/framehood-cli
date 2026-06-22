@@ -26,7 +26,6 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
-          cache: false
       - name: Verify the GitHub release + checksums exist
         env:
           VERSION: ${{ inputs.version }}
