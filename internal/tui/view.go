@@ -138,6 +138,20 @@ func (m model) statusView(w int) string {
 		return "\n" + m.workingView()
 
 	case phaseDone:
+		// Immediate read action (files·list, org·info, billing·balance, …): show
+		// the fetched DATA, not a media URL. No open/copy/save — it's information.
+		if m.readData != "" {
+			hdr := "READ"
+			if m.readHdr != "" {
+				hdr = strings.ToUpper(m.readHdr)
+			}
+			inner := lipgloss.JoinVertical(lipgloss.Left,
+				styGreen.Render("✓ "+hdr),
+				styText.Render(truncateBlock(m.readData, w-8, 18)),
+				styDim.Render("enter = clear · / = new command"))
+			return "\n" + styEyebrow.Render(hdr) + "\n" +
+				styPanel.BorderForeground(colGreen).Width(w-4).Render(inner)
+		}
 		it, ok := m.selectedItem()
 		head := styGreen.Render("✓ done")
 		if ok && it.failed {
@@ -177,10 +191,15 @@ func (m model) workingView() string {
 	elapsed := fmtDur(time.Since(m.started).Round(time.Second))
 
 	if !m.generating() {
-		// Submitting: calm dot spinner, no job_id yet.
+		// No job to poll yet: calm dot spinner. This covers both the pre-job
+		// submit moment ("submitting") and an immediate read fetch ("running").
+		label := "submitting"
+		if m.status == "running" {
+			label = "running"
+		}
 		return fmt.Sprintf("%s %s %s",
 			styAcc.Render(m.spin.View()),
-			styText.Render("submitting"),
+			styText.Render(label),
 			styDim.Render("· "+elapsed))
 	}
 
@@ -238,4 +257,28 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// truncateBlock clamps a multi-line string to at most maxLines lines, each at
+// most width runes wide, so a large read payload (e.g. a long files·list) can't
+// blow out the result panel. A trailing "…" line marks truncation.
+func truncateBlock(s string, width, maxLines int) string {
+	if width < 8 {
+		width = 8
+	}
+	lines := strings.Split(s, "\n")
+	clipped := false
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		clipped = true
+	}
+	for i, ln := range lines {
+		if len([]rune(ln)) > width {
+			lines[i] = string([]rune(ln)[:width-1]) + "…"
+		}
+	}
+	if clipped {
+		lines = append(lines, styDim.Render("…"))
+	}
+	return strings.Join(lines, "\n")
 }

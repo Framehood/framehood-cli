@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -153,6 +154,8 @@ type model struct {
 	status   string
 	balance  string
 	result   string
+	readData string // pretty-printed output of an immediate read action (files·list, org·info, …)
+	readHdr  string // header label for readData ("files·list" etc.)
 	errMsg   string
 	jobID    string
 	genFrame int // animation frame for the "generating" wave; advances each tick
@@ -375,6 +378,16 @@ type submittedMsg struct {
 	job mcp.Job
 	err error
 }
+
+// immediateResultMsg carries the outcome of an immediate read action
+// (files·list, org·info, billing·balance, …). These tools return their DATA —
+// a list/object/string via the MCP tool-call content — NOT a job envelope, so
+// they are fetched with the raw CallTool path and never decoded as a Job.
+type immediateResultMsg struct {
+	label string          // "files·list" etc., for the result header
+	raw   json.RawMessage // the tool's raw content payload
+	err   error
+}
 type polledMsg struct {
 	job mcp.Job
 	err error
@@ -469,11 +482,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			// Submit failed before a job existed — recover to a usable compose
+			// state (input focused, esc/enter dismisses) rather than parking the
+			// user in the output zone behind a stale error.
 			m.phase = phaseError
 			m.errMsg = msg.err.Error()
-			return m.setFocus(zoneOutput), nil
+			m.jobID = ""
+			return m.setFocus(zoneInput), nil
 		}
 		return m.handleJob(msg.job)
+
+	case immediateResultMsg:
+		// Result of an immediate read action. There is no job and nothing to poll;
+		// whatever the outcome, the studio must land in a usable, recoverable
+		// state (input focusable, esc/enter dismisses) — never stuck in
+		// phaseWorking. Drop a late result delivered after logout / a new action.
+		if m.client == nil || m.phase != phaseWorking {
+			return m, nil
+		}
+		m.jobID = ""
+		if msg.err != nil {
+			m.phase = phaseError
+			m.errMsg = msg.err.Error()
+			m.readData, m.readHdr = "", ""
+			return m.setFocus(zoneInput), nil
+		}
+		m.phase = phaseDone
+		m.readData = prettyJSON(msg.raw)
+		m.readHdr = msg.label
+		m.result, m.errMsg = "", ""
+		m.notice = ""
+		// Read results are informational — keep focus on the input so the user can
+		// immediately read the output and type the next command (esc/enter also
+		// dismiss cleanly via the normal input path).
+		return m.setFocus(zoneInput), nil
 
 	case polledMsg:
 		// Ignore a poll result delivered after logout / a new action (no client
@@ -482,9 +524,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			// A poll failure must not strand the user in phaseWorking. Recover to a
+			// usable compose state (input focused, esc/enter dismisses).
 			m.phase = phaseError
 			m.errMsg = msg.err.Error()
-			return m.setFocus(zoneOutput), nil
+			return m.setFocus(zoneInput), nil
 		}
 		// Success result must be for the job we're tracking — drop a stale poll
 		// for a previous job id.
@@ -610,6 +654,7 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 			if m.phase != phaseWorking {
 				m.phase = phaseIdle
 				m.result, m.errMsg, m.jobID, m.notice = "", "", "", ""
+				m.readData, m.readHdr = "", ""
 			}
 			return m.setFocus(zoneInput), nil
 		case "open":
@@ -674,16 +719,22 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 			m.errMsg = signedOutMsg
 			return m.setFocus(zoneOutput), nil
 		}
-		m.phase = phaseWorking
-		m.status = "submitting"
+		// Immediate read actions return DATA, not a job. They MUST go through the
+		// raw CallTool path (immediateCmd), never Submit's Job-decode path — a list
+		// or bare string would otherwise either fail to decode ("decode job: …") or
+		// silently produce an empty job and wedge the studio in an endless poll.
+		// This is a one-shot fetch, NOT a pollable job: no jobID, no phaseWorking.
+		m.phase = phaseWorking // brief "running" indicator only (no job to poll)
+		m.status = "running"
 		m.result, m.errMsg, m.jobID = "", "", ""
+		m.readData, m.readHdr = "", ""
 		m.genFrame = 0
+		label := m.action.tool + "·" + m.action.action
 		m.inflight = m.action
-		m.inflightLabel = m.action.tool + "·" + m.action.action
+		m.inflightLabel = label
 		m.started = time.Now()
-		// Immediate actions have no promptField; build minimal args directly.
 		tool, args := argsForImmediateAction(m.action)
-		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
+		return m, tea.Batch(m.spin.Tick, immediateCmd(m.client, label, tool, args))
 	case cmdNeedsForm:
 		// The only consumer of a chained result — startForm seeds the first
 		// media field and clears seedURL itself.
@@ -763,6 +814,7 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.phase != phaseWorking {
 			m.phase = phaseIdle
 			m.result, m.errMsg, m.jobID, m.notice = "", "", "", ""
+			m.readData, m.readHdr = "", ""
 			m.input.SetValue("")
 			return m.setFocus(zoneInput), nil
 		}
@@ -933,6 +985,7 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	m.phase = phaseWorking
 	m.status = "submitting"
 	m.result, m.errMsg, m.jobID = "", "", ""
+	m.readData, m.readHdr = "", ""
 	m.genFrame = 0
 	m.inflight = m.action
 	m.inflightLabel = m.formSummary()
@@ -953,6 +1006,21 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if len(m.formFields) > 0 {
 		return m.updateForm(msg)
+	}
+
+	// Recoverable dismissal: when an error notice or an immediate read result is
+	// showing, Esc (or Enter on an empty prompt) clears it back to a clean idle
+	// compose state. This guarantees the studio never traps the user behind a
+	// stale error/result panel — there's always a key that returns control.
+	if m.phase == phaseError || (m.phase == phaseDone && m.readData != "") {
+		dismiss := key.Matches(msg, m.keys.Esc) ||
+			(key.Matches(msg, m.keys.Generate) && strings.TrimSpace(m.input.Value()) == "")
+		if dismiss {
+			m.phase = phaseIdle
+			m.errMsg, m.result, m.notice = "", "", ""
+			m.readData, m.readHdr = "", ""
+			return m.setFocus(zoneInput), nil
+		}
 	}
 
 	switch {
@@ -1026,6 +1094,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
+		m.readData, m.readHdr = "", ""
 		m.genFrame = 0
 		m.inflight = m.action
 		m.inflightLabel = prompt
@@ -1156,6 +1225,39 @@ func submitCmd(c *mcp.Client, tool string, args map[string]any) tea.Cmd {
 		job, err := c.Submit(ctx, tool, args)
 		return submittedMsg{job: job, err: err}
 	}
+}
+
+// immediateCmd runs an immediate read action (files·list, org·info,
+// billing·balance, …). It calls the RAW tool path (CallTool) and returns the
+// data untouched — these tools answer with a list/object/string, not a job
+// envelope, so they must NOT go through Submit's Job decode.
+func immediateCmd(c *mcp.Client, label, tool string, args map[string]any) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		raw, err := c.CallTool(ctx, tool, args)
+		return immediateResultMsg{label: label, raw: raw, err: err}
+	}
+}
+
+// prettyJSON renders a raw tool payload for the result panel: valid JSON is
+// indented for readability; anything else (a bare string, plain text) is shown
+// as-is, trimmed. It never errors — the worst case is the original text.
+func prettyJSON(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return "(empty)"
+	}
+	// A bare JSON string ("…") reads better unquoted.
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return strings.TrimSpace(str)
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err == nil {
+		return buf.String()
+	}
+	return s
 }
 
 func pollCmd(c *mcp.Client, jobID string) tea.Cmd {
