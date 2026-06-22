@@ -40,11 +40,11 @@ func Execute() error {
 				// Anything else (corrupted creds, permission error) is a real
 				// failure the user should see, not silently swallow.
 				if errors.Is(err, auth.ErrNotLoggedIn) {
-					return tui.Run(nil, "", authn, cfg)
+					return tui.Run(nil, "", authn, cfg, Version)
 				}
 				return err
 			}
-			return tui.Run(sess.Client(), sess.Email(), authn, cfg)
+			return tui.Run(sess.Client(), sess.Email(), authn, cfg, Version)
 		},
 	}
 
@@ -58,6 +58,7 @@ func Execute() error {
 		newProjectCmd(cfg),
 		newTeamCmd(cfg),
 		newConfigCmd(cfg),
+		newUpgradeCmd(),
 	)
 	return root.Execute()
 }

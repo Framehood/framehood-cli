@@ -38,8 +38,8 @@ var metaCmds = []paletteCmd{
 	{id: "/whoami", title: "whoami", kind: cmdImmediate, meta: "whoami"},
 	{id: "/history", title: "history", kind: cmdImmediate, meta: "history"},
 	{id: "/setdir", title: "set output dir", kind: cmdImmediate, meta: "setdir"},
+	{id: "/upgrade", title: "upgrade", kind: cmdImmediate, meta: "upgrade"},
 	{id: "/quit", title: "quit", kind: cmdImmediate, meta: "quit"},
-	// TODO: /upgrade  — leave hook; implement later
 }
 
 // buildPaletteCmds flattens catalog + meta into the full command list.
