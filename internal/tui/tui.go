@@ -1071,16 +1071,25 @@ func (m model) handleJob(j mcp.Job) (tea.Model, tea.Cmd) {
 	if j.Status == "failed" {
 		m.phase = phaseError
 		m.errMsg = "job failed: " + strings.TrimSpace(string(j.Error))
-		m.history = append(m.history, historyItem{kind: label, prompt: prompt, failed: true, at: time.Now()})
+		m.history = capHistory(append(m.history, historyItem{kind: label, prompt: prompt, failed: true, at: time.Now()}))
 		m.rebuildHistory(true)
 		return m.setFocus(zoneOutput), tea.Batch(loadBalanceCmd(m.client), m.saveHistoryCmd())
 	}
 	m.phase = phaseDone
 	m.result = j.ResultURL()
 	m.notice = ""
-	m.history = append(m.history, historyItem{kind: label, prompt: prompt, url: m.result, at: time.Now()})
+	m.history = capHistory(append(m.history, historyItem{kind: label, prompt: prompt, url: m.result, at: time.Now()}))
 	m.rebuildHistory(true)
 	return m.setFocus(zoneOutput), tea.Batch(loadBalanceCmd(m.client), m.saveHistoryCmd())
+}
+
+// capHistory keeps the in-memory generation history bounded to the same limit as
+// the persisted file, so a long session can't grow it without bound.
+func capHistory(h []historyItem) []historyItem {
+	if len(h) > maxPersistedHistory {
+		return h[len(h)-maxPersistedHistory:]
+	}
+	return h
 }
 
 // saveHistoryCmd persists the current generation history off the UI thread.

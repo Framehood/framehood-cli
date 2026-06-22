@@ -148,6 +148,8 @@ func TestPagination_NewGenerationReturnsToNewestPage(t *testing.T) {
 }
 
 func TestHistoryView_RendersIndicator(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 	lipgloss.SetColorProfile(termenv.Ascii)
 	m := makeHistoryModel(20)
 	out := m.historyView()
