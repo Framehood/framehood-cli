@@ -78,6 +78,49 @@ func TestPaletteNavigation(t *testing.T) {
 	}
 }
 
+// TestPaletteColsPersistForGridNav is the regression test for the value-receiver
+// bug: model.View() copies the model, so computing p.cols inside View only
+// mutated the copy — the real model's cols stayed 0 and grid ↑/↓ navigation
+// silently fell back to ←/→. The fix sets cols via layout() on the Update path.
+// This test drives the REAL Update path (open palette via the `/` key) and
+// asserts cols persisted (>1) and that ↓ advances the selection by exactly cols.
+func TestPaletteColsPersistForGridNav(t *testing.T) {
+	m := newTestModel()
+	// Apply a wide window so more than one column fits.
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = m2.(model)
+
+	// Open the palette through the real key path (this is where layout() runs).
+	m.input.SetValue("")
+	op, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = op.(model)
+	if !m.palette.isOpen() {
+		t.Fatal("'/' should open the palette")
+	}
+
+	// cols must be persisted on the REAL model (not lost on a View copy).
+	cols := m.palette.cols
+	if cols <= 1 {
+		t.Fatalf("palette.cols = %d after open at width 100, want > 1 (grid nav needs it)", cols)
+	}
+
+	// Down should advance by a full row (cols), proving grid nav uses the
+	// persisted cols rather than degrading to a single-step move.
+	startSel := m.palette.sel
+	dn, _ := m.updatePalette(tea.KeyMsg{Type: tea.KeyDown})
+	m = dn.(model)
+	if got := m.palette.sel - startSel; got != cols {
+		t.Errorf("after ↓: sel advanced by %d, want cols=%d (grid nav broken)", got, cols)
+	}
+
+	// A WindowSizeMsg while the palette is open must keep cols consistent.
+	wm, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 30})
+	m = wm.(model)
+	if m.palette.cols < 1 {
+		t.Errorf("after resize: cols = %d, want ≥1", m.palette.cols)
+	}
+}
+
 // TestPaletteViewNoPanic is the non-interactive render smoke test described in
 // the spec. It constructs a model at a fixed 100×30 window, opens the palette
 // with a query, and confirms View() produces a non-empty columns grid without
@@ -150,8 +193,12 @@ func TestPaletteViewSmallWidth(t *testing.T) {
 			if out == "" {
 				t.Fatalf("palette.View(width=%d, empty query) returned empty", w)
 			}
+			// cols is set by the authoritative layout() path (View no longer
+			// mutates it, since model.View has a value receiver). layout must
+			// clamp to ≥1 at any width so grid nav never divides by zero.
+			p.layout(w)
 			if p.cols < 1 {
-				t.Errorf("width=%d: cols = %d, want ≥1", w, p.cols)
+				t.Errorf("width=%d: layout cols = %d, want ≥1", w, p.cols)
 			}
 			if w == 20 {
 				t.Logf("=== Palette render at width=20, empty query (cols=%d) ===\n%s\n", p.cols, out)

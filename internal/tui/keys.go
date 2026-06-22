@@ -46,8 +46,8 @@ func defaultKeys() keyMap {
 		Generate: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "generate")),
 		Esc:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close/cancel")),
 
-		ShiftTab: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "action")),
-		Tab:      key.NewBinding(key.WithKeys("tab")),
+		ShiftTab: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "next action")),
+		Tab:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "prev action")),
 
 		Up:   key.NewBinding(key.WithKeys("up", "k")),
 		Down: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↑↓", "select")),
@@ -92,7 +92,7 @@ func (h helpContext) ShortHelp() []key.Binding {
 		}
 		return append(b, k.Help, k.ForceQuit)
 	default: // zoneInput (primary surface)
-		return []key.Binding{k.SlashOpen, k.ShiftTab, k.Generate, k.Help, k.ForceQuit}
+		return []key.Binding{k.SlashOpen, k.ShiftTab, k.Tab, k.Generate, k.Help, k.ForceQuit}
 	}
 }
 
@@ -100,7 +100,7 @@ func (h helpContext) ShortHelp() []key.Binding {
 func (h helpContext) FullHelp() [][]key.Binding {
 	k := h.keys
 	return [][]key.Binding{
-		{k.SlashOpen, k.ShiftTab, k.Generate, k.Esc},
+		{k.SlashOpen, k.ShiftTab, k.Tab, k.Generate, k.Esc},
 		{k.Down, k.Open, k.Copy, k.Save, k.Use},
 		{k.Help, k.ForceQuit},
 	}

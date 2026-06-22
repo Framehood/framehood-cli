@@ -28,7 +28,10 @@ func TestShortHelp_FocusAware(t *testing.T) {
 		t.Error("input zone help should list / (open palette)")
 	}
 	if !helpListed(in, "shift+tab") {
-		t.Error("input zone help should list shift+tab (cycle type)")
+		t.Error("input zone help should list shift+tab (next action)")
+	}
+	if !helpListed(in, "tab") {
+		t.Error("input zone help should list tab (prev action — reverse cycle)")
 	}
 	if !helpListed(in, "enter") {
 		t.Error("input zone help should list enter (generate)")

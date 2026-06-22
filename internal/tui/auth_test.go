@@ -144,6 +144,59 @@ func TestPollTickAfterLogout_NoNilDeref(t *testing.T) {
 	}
 }
 
+// TestStaleJobMessagesDropped verifies that submittedMsg/polledMsg delivered
+// when no job is current (after logout, or for a different job id) are dropped
+// — they must not repopulate job/history state behind the user's back.
+func TestStaleJobMessagesDropped(t *testing.T) {
+	// (a) A submittedMsg after logout (client nil, not working) is ignored.
+	m := newTestModel()
+	m.client = nil
+	m.loggedIn = false
+	m.phase = phaseIdle
+	histLen := len(m.history)
+
+	nm, cmd := m.Update(submittedMsg{job: mcp.Job{ID: "job_late", Status: "queued"}})
+	got := nm.(model)
+	if got.phase == phaseWorking || got.jobID != "" {
+		t.Errorf("stale submittedMsg must not start tracking a job: phase=%v jobID=%q", got.phase, got.jobID)
+	}
+	if cmd != nil {
+		t.Error("stale submittedMsg must not schedule follow-up work")
+	}
+	if len(got.history) != histLen {
+		t.Error("stale submittedMsg must not append to history")
+	}
+
+	// (b) A polledMsg for a DIFFERENT job id than the one we're tracking is
+	// ignored (e.g. a tick from a previous action).
+	m2 := newTestModel()
+	m2.client = mcp.New("https://example/mcp", nil)
+	m2.phase = phaseWorking
+	m2.jobID = "job_current"
+	h2 := len(m2.history)
+
+	nm2, _ := m2.Update(polledMsg{job: mcp.Job{ID: "job_other", Status: "succeeded",
+		Outputs: map[string]any{"image_url": "https://cdn.framehood.ai/x.jpg"}}})
+	got2 := nm2.(model)
+	if got2.phase == phaseDone {
+		t.Error("a poll result for a different job id must not complete the current job")
+	}
+	if len(got2.history) != h2 {
+		t.Error("a stale-id poll result must not append to history")
+	}
+	if got2.jobID != "job_current" {
+		t.Errorf("current jobID changed to %q on a stale poll result", got2.jobID)
+	}
+
+	// (c) The matching poll result IS handled (sanity: the gate isn't too tight).
+	nm3, _ := m2.Update(polledMsg{job: mcp.Job{ID: "job_current", Status: "succeeded",
+		Outputs: map[string]any{"image_url": "https://cdn.framehood.ai/ok.jpg"}}})
+	got3 := nm3.(model)
+	if got3.phase != phaseDone {
+		t.Errorf("a matching poll result should complete the job; phase=%v", got3.phase)
+	}
+}
+
 // TestRunLogout_ModelSurvivesKeypress verifies that after a real logout (which
 // nil-resets m.client) the model handles a subsequent keypress without a nil
 // panic. The Enter path on a runnable work action must short-circuit on the
@@ -183,20 +236,28 @@ func TestRunLogout_ModelSurvivesKeypress(t *testing.T) {
 	}
 
 	// Route an immediate palette action while signed out: also guarded, no panic.
+	balance := paletteCmdByID(t, "billing·balance")
+	nm2, _ := got.runPaletteCmd(&balance)
+	im := nm2.(model)
+	if im.phase == phaseWorking {
+		t.Error("immediate action while signed out must not start a job")
+	}
+	if im.errMsg == "" {
+		t.Error("immediate action while signed out should set the not-signed-in error")
+	}
+}
+
+// paletteCmdByID returns the palette command with the given id, failing the
+// test (rather than silently passing) if no such command exists.
+func paletteCmdByID(t *testing.T, id string) paletteCmd {
+	t.Helper()
 	for _, c := range allPaletteCmds {
-		if c.id == "billing·balance" {
-			cc := c
-			nm2, _ := got.runPaletteCmd(&cc)
-			im := nm2.(model)
-			if im.phase == phaseWorking {
-				t.Error("immediate action while signed out must not start a job")
-			}
-			if im.errMsg == "" {
-				t.Error("immediate action while signed out should set the not-signed-in error")
-			}
-			break
+		if c.id == id {
+			return c
 		}
 	}
+	t.Fatalf("palette command %q not found", id)
+	return paletteCmd{}
 }
 
 func TestRunLogin_RefreshesSessionOnSuccess(t *testing.T) {

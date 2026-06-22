@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"errors"
+
+	"github.com/Framehood/framehood-cli/internal/auth"
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/tui"
 	"github.com/spf13/cobra"
@@ -33,7 +36,13 @@ func Execute() error {
 			authn := studioAuth{cfg: cfg}
 			sess, err := NewSession(cfg)
 			if err != nil {
-				return tui.Run(nil, "", authn)
+				// Only a *missing/stale* credential means "launch signed out".
+				// Anything else (corrupted creds, permission error) is a real
+				// failure the user should see, not silently swallow.
+				if errors.Is(err, auth.ErrNotLoggedIn) {
+					return tui.Run(nil, "", authn)
+				}
+				return err
 			}
 			return tui.Run(sess.Client(), sess.Email(), authn)
 		},

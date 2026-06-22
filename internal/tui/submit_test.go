@@ -305,3 +305,58 @@ func TestChainSeedsForm(t *testing.T) {
 		t.Errorf("field 0 input = %q, want the seed", m.input.Value())
 	}
 }
+
+// TestSeedURLClearedOnAbandon verifies a pending chain (seedURL set by "use as
+// input") is dropped on every path that does NOT open a consuming form, so it
+// can't silently prefill an unrelated form opened later.
+func TestSeedURLClearedOnAbandon(t *testing.T) {
+	const seed = "https://cdn.framehood.ai/chain.mp4"
+
+	// (a) Esc out of the palette abandons the chain.
+	m := newTestModel()
+	m.seedURL = seed
+	m.palette = openPaletteState()
+	nm, _ := m.updatePalette(tea.KeyMsg{Type: tea.KeyEsc})
+	if got := nm.(model).seedURL; got != "" {
+		t.Errorf("palette Esc: seedURL = %q, want cleared", got)
+	}
+
+	// (b) A meta command (/help) abandons the chain.
+	m = newTestModel()
+	m.seedURL = seed
+	help := paletteCmdByID(t, "/help")
+	nmh, _ := m.runPaletteCmd(&help)
+	if got := nmh.(model).seedURL; got != "" {
+		t.Errorf("meta cmd: seedURL = %q, want cleared", got)
+	}
+
+	// (c) A prompt-only action (image·create) abandons the chain (it takes no
+	// media URL).
+	m = newTestModel()
+	m.seedURL = seed
+	create := paletteCmdByID(t, "image·create")
+	nmc, _ := m.runPaletteCmd(&create)
+	if got := nmc.(model).seedURL; got != "" {
+		t.Errorf("prompt-only action: seedURL = %q, want cleared", got)
+	}
+
+	// (d) A form-less action (video·scene) abandons the chain.
+	m = newTestModel()
+	m.seedURL = seed
+	m = m.startForm(findAction(t, "video", "scene"))
+	if m.seedURL != "" {
+		t.Errorf("form-less action: seedURL = %q, want cleared", m.seedURL)
+	}
+
+	// End-to-end: after abandoning via Esc, opening an UNRELATED form must NOT
+	// prefill its media field with the stale URL.
+	m = newTestModel()
+	m.seedURL = seed
+	m.palette = openPaletteState()
+	esc, _ := m.updatePalette(tea.KeyMsg{Type: tea.KeyEsc})
+	m = esc.(model)
+	m = m.startForm(findAction(t, "image", "edit")) // image_url + prompt
+	if m.formVals["image_url"] == seed {
+		t.Error("stale seedURL leaked into an unrelated form's media field")
+	}
+}

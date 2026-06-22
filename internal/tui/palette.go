@@ -83,8 +83,7 @@ type paletteState struct {
 	query   string // text after the leading /
 	matches []int  // indices into allPaletteCmds
 	sel     int    // selected index within matches
-	cols    int    // number of columns last computed
-	colW    int    // width per cell (fixed)
+	cols    int    // persisted column count — grid nav (moveUp/Down) keys off this
 }
 
 // open returns true when the palette is visible.
@@ -95,6 +94,29 @@ func openPaletteState() paletteState {
 	p := paletteState{open: true, query: ""}
 	p.refilter()
 	return p
+}
+
+// columnsFor returns how many fixed-width cells fit in the given content width
+// (always ≥1). It is the single source of truth for the grid column count,
+// shared by layout() (which persists it for navigation) and View() (rendering).
+func columnsFor(width int) int {
+	available := width - 4 // box padding (Padding(0,1)=2) + 2 border chars
+	if available < paletteCellTotal {
+		available = paletteCellTotal
+	}
+	cols := available / paletteCellTotal
+	if cols < 1 {
+		cols = 1
+	}
+	return cols
+}
+
+// layout recomputes and PERSISTS the column count for the current width. It must
+// be called from the Update path (where the real model is mutated), because
+// model.View has a value receiver — computing cols inside View would only mutate
+// a throwaway copy, leaving the real model's cols at 0 and breaking ↑/↓ nav.
+func (p *paletteState) layout(width int) {
+	p.cols = columnsFor(width)
 }
 
 // refilter rebuilds the matches slice for the current query (case-insensitive
@@ -219,17 +241,13 @@ var (
 
 // View renders the palette as a column grid inside a rounded border.
 // width is the available content width (same as composerView uses).
-func (p *paletteState) View(width int) string {
-	// Compute how many columns fit.
-	available := width - 4 // account for box padding (Padding(0,1) = 2) + 2 border chars
-	if available < paletteCellTotal {
-		available = paletteCellTotal
-	}
-	cols := available / paletteCellTotal
-	if cols < 1 {
-		cols = 1
-	}
-	p.cols = cols
+//
+// View derives its column count locally for rendering and does NOT persist it:
+// model.View has a value receiver, so any mutation here lands on a copy. The
+// authoritative cols used by grid navigation is set by layout() on the Update
+// path. The two agree because both go through columnsFor.
+func (p paletteState) View(width int) string {
+	cols := columnsFor(width)
 
 	label := styPaletteLabel.Render("COMMANDS")
 	queryLine := styPaletteQuery.Render("/") + styText.Render(p.query)

@@ -55,6 +55,10 @@ type historyItem struct {
 // composer state.
 const composerPlaceholder = "type a prompt · / for commands · ⇧⇥ to change action"
 
+// signedOutMsg is shown when an action needs auth but the studio is signed out.
+// It points at the in-TUI /login (no need to quit the studio anymore).
+const signedOutMsg = "You're not signed in. Run /login to sign in."
+
 // serviceTools are the catalog groups Shift+Tab must NOT cycle through: account
 // reads/management and job status. Their actions reach the studio only through
 // the `/` command palette, never the work-action ring.
@@ -334,6 +338,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - 6
 		m.help.Width = msg.Width - 4
 		m.rebuildHistory(false)
+		if m.palette.isOpen() {
+			m.palette.layout(m.contentWidth()) // keep grid nav correct after resize
+		}
 
 	case tea.KeyMsg:
 		// ctrl+c always quits regardless of state.
@@ -359,6 +366,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case submittedMsg:
+		// Drop a result that belongs to no current job — e.g. an in-flight submit
+		// that lands after /logout (client nil-ed, working state torn down). The
+		// submit response is what assigns the job id, so we can't match on id yet;
+		// gate on client + working phase instead.
+		if m.client == nil || m.phase != phaseWorking {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.phase = phaseError
 			m.errMsg = msg.err.Error()
@@ -367,18 +381,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleJob(msg.job)
 
 	case polledMsg:
+		// Ignore a poll result delivered after logout / a new action (no client
+		// or not working anymore).
+		if m.client == nil || m.phase != phaseWorking {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.phase = phaseError
 			m.errMsg = msg.err.Error()
 			return m.setFocus(zoneOutput), nil
+		}
+		// Success result must be for the job we're tracking — drop a stale poll
+		// for a previous job id.
+		if msg.job.ID != m.jobID {
+			return m, nil
 		}
 		return m.handleJob(msg.job)
 
 	case pollTickMsg:
 		// A logout (or any client teardown) may have nil-ed the client while a
 		// poll tick was already scheduled — drop the stale tick instead of
-		// dereferencing a nil client.
-		if m.client == nil {
+		// dereferencing a nil client. Also drop ticks for a job we're no longer
+		// tracking.
+		if m.client == nil || m.phase != phaseWorking || msg.jobID != m.jobID {
 			return m, nil
 		}
 		return m, pollCmd(m.client, msg.jobID)
@@ -413,9 +438,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Esc):
-		// Close palette, restore empty input.
+		// Close palette, restore empty input. A pending chain (seedURL from
+		// "use as input") is abandoned here — clear it so it can't leak into an
+		// unrelated form opened later.
 		m.palette = paletteState{}
 		m.input.SetValue("")
+		m.seedURL = ""
 		return m.setFocus(zoneInput), nil
 
 	case key.Matches(msg, m.keys.Generate): // enter → run selected command
@@ -469,6 +497,9 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 	m.notice = ""
 
 	if cmd.meta != "" {
+		// Meta commands never consume a chained result — abandon any pending one
+		// so it can't prefill a future form.
+		m.seedURL = ""
 		// Meta (immediate) commands.
 		switch cmd.meta {
 		case "help":
@@ -524,10 +555,11 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 
 	switch cmd.kind {
 	case cmdImmediate:
-		// Read-only, no-required-arg action — submit immediately without prompting.
+		// Read-only action: doesn't consume a chained result — drop any pending one.
+		m.seedURL = ""
 		if !m.loggedIn {
 			m.phase = phaseError
-			m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+			m.errMsg = signedOutMsg
 			return m.setFocus(zoneOutput), nil
 		}
 		m.phase = phaseWorking
@@ -540,8 +572,12 @@ func (m model) runPaletteCmd(cmd *paletteCmd) (tea.Model, tea.Cmd) {
 		tool, args := argsForImmediateAction(m.action)
 		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
 	case cmdNeedsForm:
+		// The only consumer of a chained result — startForm seeds the first
+		// media field and clears seedURL itself.
 		return m.startForm(*cmd.spec), nil
 	default: // cmdNeedsPrompt
+		// Prompt-only action takes no media URL — drop any pending chain.
+		m.seedURL = ""
 		m.formFields = nil
 		m.input.Placeholder = "Describe what to create…"
 		return m.setFocus(zoneInput), nil
@@ -590,6 +626,7 @@ func (m model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.seedURL = it.url
 			m.notice = styAcc.Render("chaining result → pick an action")
 			m.palette = openPaletteState()
+			m.palette.layout(m.contentWidth()) // persist cols for grid ↑/↓ nav
 			return m.setFocus(zoneInput), nil
 		}
 		return m, nil
@@ -616,6 +653,8 @@ func (m model) startForm(spec actionSpec) model {
 	m.action = spec
 	fields := spec.form()
 	if len(fields) == 0 {
+		// No form to consume a chained result — abandon any pending one.
+		m.seedURL = ""
 		m.formFields = nil
 		m.input.Placeholder = composerPlaceholder
 		m.notice = styRed.Render(specUnavailableNotice(spec))
@@ -757,7 +796,7 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	}
 	if !m.loggedIn {
 		m.phase = phaseError
-		m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+		m.errMsg = signedOutMsg
 		m.formFields = nil
 		return m.setFocus(zoneOutput), nil
 	}
@@ -800,6 +839,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open the palette when the input is empty or the typed char is '/'.
 		m.input.SetValue("")
 		m.palette = openPaletteState()
+		m.palette.layout(m.contentWidth()) // persist cols for grid ↑/↓ nav
 		return m, nil
 
 	case key.Matches(msg, m.keys.Esc):
@@ -819,7 +859,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if !m.loggedIn {
 			m.phase = phaseError
-			m.errMsg = "You're not signed in. Quit and run `framehood login` first."
+			m.errMsg = signedOutMsg
 			return m.setFocus(zoneOutput), nil
 		}
 		if !m.action.runnable() {
