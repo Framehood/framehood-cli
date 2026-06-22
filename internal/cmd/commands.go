@@ -94,7 +94,7 @@ type identity struct {
 // a failing tool just leaves its fields blank rather than erroring out.
 func aggregateIdentity(cmd *cobra.Command, sess *Session) (identity, bool) {
 	var id identity
-	var any bool
+	var gotData bool
 	if raw, err := sess.Client().Balance(cmd.Context()); err == nil {
 		var b struct {
 			Balance any    `json:"balance"`
@@ -102,7 +102,7 @@ func aggregateIdentity(cmd *cobra.Command, sess *Session) (identity, bool) {
 			Email   string `json:"email"`
 		}
 		if json.Unmarshal(raw, &b) == nil {
-			any = true
+			gotData = true
 			id.email, id.role = b.Email, b.Role
 			if b.Balance != nil {
 				id.balance = fmt.Sprintf("%v credits", b.Balance)
@@ -114,11 +114,11 @@ func aggregateIdentity(cmd *cobra.Command, sess *Session) (identity, bool) {
 			Plan string `json:"plan"`
 		}
 		if json.Unmarshal(raw, &p) == nil {
-			any = true
+			gotData = true
 			id.plan = p.Plan
 		}
 	}
-	return id, any
+	return id, gotData
 }
 
 // render produces the labeled whoami block, omitting fields we couldn't fetch.
