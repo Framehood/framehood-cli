@@ -197,7 +197,7 @@ func TestRunWorkflowsList_PartialSuccess(t *testing.T) {
 			} `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Params.URI == "zvs://workflow/"+first {
+		if req.Params.URI == "zvs://workflow/"+pathSeg(first) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, workflowResource(first, "# First\n\nThe first workflow."))
 			return
