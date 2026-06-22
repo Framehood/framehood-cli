@@ -81,6 +81,8 @@ var serviceTools = map[string]bool{
 	"org":        true,
 	"files":      true,
 	"get_status": true,
+	"library":    true,
+	"project":    true,
 }
 
 // workActions is the ordered ring Shift+Tab cycles through: every
@@ -941,10 +943,18 @@ func (m model) startForm(spec actionSpec) model {
 }
 
 func formPlaceholder(p paramSpec) string {
-	if p.isMedia() {
+	switch {
+	case p.isMedia():
 		return p.label + " — paste a URL (ctrl+r = latest result)"
+	case p.kind == pTextList:
+		return p.label + " — comma-separated"
+	case p.kind == pNumber:
+		return p.label + " — a number (optional)"
+	case p.kind == pJSON:
+		return p.label + " — JSON object or plain text"
+	default:
+		return p.label
 	}
-	return p.label
 }
 
 func (m model) latestResultURL() string {
@@ -963,14 +973,8 @@ func (m model) formMissing() string {
 			continue
 		}
 		raw := strings.TrimSpace(m.formVals[f.name])
-		if f.kind == pMediaList {
-			valid := 0
-			for _, p := range strings.Split(raw, ",") {
-				if strings.TrimSpace(p) != "" {
-					valid++
-				}
-			}
-			if valid == 0 {
+		if f.isList() {
+			if len(splitList(raw)) == 0 {
 				miss = append(miss, f.label)
 			}
 			continue
@@ -1062,8 +1066,6 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 		return m.setFocus(zoneOutput), nil
 	}
 	tool, args := argsForForm(m.action, m.formVals)
-	m.phase = phaseWorking
-	m.status = "submitting"
 	m.result, m.errMsg, m.jobID = "", "", ""
 	m.readData, m.readHdr = "", ""
 	m.genFrame = 0
@@ -1073,7 +1075,20 @@ func (m model) submitForm() (tea.Model, tea.Cmd) {
 	m.formFields = nil
 	m.input.SetValue("")
 	m.input.Placeholder = composerPlaceholder
-	return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
+
+	// Generation actions produce a pollable job; reads/management actions return
+	// DATA. Only the former may go through Submit's Job-decode path — routing a
+	// data-returning action there would fail to decode or wedge an empty-job poll
+	// (the same class of bug the immediate-read fix addressed).
+	if m.action.kind == kindGenerate {
+		m.phase = phaseWorking
+		m.status = "submitting"
+		return m, tea.Batch(m.spin.Tick, submitCmd(m.client, tool, args))
+	}
+	m.phase = phaseWorking
+	m.status = "running"
+	label := m.action.tool + "·" + m.action.action
+	return m, tea.Batch(m.spin.Tick, immediateCmd(m.client, label, tool, args))
 }
 
 // updateInput: the prompt field is focused — text editing happens here.

@@ -1,6 +1,10 @@
 package tui
 
-import "strings"
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+)
 
 // actionKind classifies what selecting an action does, so the studio can hint
 // the right next step and (later) render the right output.
@@ -106,6 +110,20 @@ var catalog = []toolGroup{
 		{"org", "invite", "invite a member", kindManage, "", "", []string{"email"}, false},
 		{"org", "remove", "remove a member", kindManage, "", "", []string{"email"}, false},
 	}},
+	{"library", "Library", []actionSpec{
+		{"library", "list", "search your generated assets", kindRead, "", "", nil, false}, // form (query/type optional)
+		{"library", "trashed", "list trashed assets", kindRead, "", "", nil, true},        // immediate
+		{"library", "trash", "move an asset to trash", kindManage, "", "", []string{"id"}, false},
+		{"library", "restore", "restore an asset from trash", kindManage, "", "", []string{"id"}, false},
+	}},
+	{"project", "Projects", []actionSpec{
+		{"project", "list", "list your projects", kindRead, "", "", nil, true},         // immediate
+		{"project", "current", "show the active project", kindRead, "", "", nil, true}, // immediate
+		{"project", "create", "create a project", kindManage, "", "", []string{"name"}, false},
+		{"project", "use", "set the active project", kindManage, "", "", nil, false},
+		{"project", "assign", "put an asset in a project", kindManage, "", "", []string{"asset_id"}, false},
+		{"project", "delete", "delete a project", kindManage, "", "", []string{"id"}, false},
+	}},
 	{"get_status", "Job status", []actionSpec{
 		{"get_status", "check", "check a job by id", kindRead, "", "", []string{"job_id"}, false},
 	}},
@@ -134,6 +152,9 @@ const (
 	pText      paramKind = iota // free text
 	pMedia                      // a single media URL (picker offers recent results)
 	pMediaList                  // comma-separated media URLs → []string
+	pTextList                   // comma-separated free-text values → []string (e.g. prompts)
+	pNumber                     // an optional integer (omitted when empty / non-numeric)
+	pJSON                       // a JSON object (a non-JSON value is wrapped as {"text": …})
 )
 
 type paramSpec struct {
@@ -144,6 +165,10 @@ type paramSpec struct {
 }
 
 func (p paramSpec) isMedia() bool { return p.kind == pMedia || p.kind == pMediaList }
+
+// isList reports whether the field collects a comma-separated list (media URLs
+// or plain text) parsed into a []string.
+func (p paramSpec) isList() bool { return p.kind == pMediaList || p.kind == pTextList }
 
 // req/opt build a required/optional field (requiredness is schema, not label text).
 func req(name, label string, k paramKind) paramSpec { return paramSpec{name, label, k, true} }
@@ -170,13 +195,34 @@ var actionForms = map[string][]paramSpec{
 	"qa.transcript":   {req("video", "video to transcribe", pMedia)},
 	"qa.person":       {req("image1", "first face", pMedia), req("image2", "second face", pMedia)},
 	"qa.image":        {req("image_url", "image to check", pMedia), req("description", "what it should show", pText)},
+	"qa.scene":        {req("video", "video to check", pMedia), req("plan", "scene plan", pJSON)},
+
+	// Actor-driven generation + manipulation (schemas: worker/src/tools/*.ts).
+	"image.actor_sheet": {req("actor_id", "actor id (act_…)", pText), opt("out_prefix", "output prefix", pText), opt("variations", "variations (1-9)", pNumber)},
+	"video.edit_ref":    {req("video_url", "source video", pMedia), req("prompt", "edit instruction", pText), req("reference_images", "reference images (comma-sep urls, ≤4)", pMediaList)},
+	"video.scene":       {req("actor_id", "actor id (act_…)", pText), req("scene_prompt", "scene description", pText), opt("speech_text", "spoken line (optional)", pText), opt("outfit_name", "outfit name (optional)", pText)},
+	"actor.create":      {req("name", "actor name", pText), req("images_data_url", "reference photos ZIP url", pMedia), opt("voice_sample_url", "voice sample url (optional)", pMedia)},
+	"actor.update":      {req("actor_id", "actor id (act_…)", pText), opt("voice_id", "ElevenLabs voice id (optional)", pText), opt("voice_sample_url", "voice sample url (optional)", pMedia)},
+	"actor.delete":      {req("actor_id", "actor id to delete (act_…)", pText)},
+	"actor.batch":       {req("actor_id", "actor id (act_…)", pText), req("prompts", "prompts (comma-separated)", pTextList), opt("kind", "kind: image | video", pText)},
+
+	// Console: projects + library — parameterized actions get a small form.
+	"project.create":  {req("name", "project name", pText), opt("visibility", "visibility: personal | shared", pText), opt("description", "description (optional)", pText)},
+	"project.use":     {opt("id", "project id (empty = clear active)", pText)},
+	"project.delete":  {req("id", "project id to delete", pText)},
+	"project.assign":  {req("asset_id", "asset id", pText), opt("id", "project id (empty = unassign)", pText)},
+	"library.list":    {opt("query", "search query (optional)", pText), opt("type", "type: image | video | audio", pText), opt("project", "project id (optional)", pText)},
+	"library.trash":   {req("id", "asset id to trash", pText)},
+	"library.restore": {req("id", "asset id to restore", pText)},
 }
 
 func (a actionSpec) form() []paramSpec { return actionForms[a.tool+"."+a.action] }
 func (a actionSpec) hasForm() bool     { return len(actionForms[a.tool+"."+a.action]) > 0 }
 
 // argsForForm builds the MCP tool name + arguments from collected form values.
-// Media-list fields are split on commas into a []string.
+// Each field is parsed per its kind: list fields → []string, number → int,
+// json → object (a plain value is wrapped as {"text": …}); the rest stay
+// strings. Empty fields are omitted entirely.
 func argsForForm(spec actionSpec, vals map[string]string) (string, map[string]any) {
 	args := map[string]any{"action": spec.action}
 	for _, f := range spec.form() {
@@ -184,16 +230,18 @@ func argsForForm(spec actionSpec, vals map[string]string) (string, map[string]an
 		if v == "" {
 			continue
 		}
-		if f.kind == pMediaList {
-			parts := strings.Split(v, ",")
-			list := make([]string, 0, len(parts))
-			for _, p := range parts {
-				if s := strings.TrimSpace(p); s != "" {
-					list = append(list, s)
-				}
+		switch f.kind {
+		case pMediaList, pTextList:
+			if list := splitList(v); len(list) > 0 {
+				args[f.name] = list
 			}
-			args[f.name] = list
-		} else {
+		case pNumber:
+			if n, err := strconv.Atoi(v); err == nil {
+				args[f.name] = n
+			}
+		case pJSON:
+			args[f.name] = parseJSONField(v)
+		default:
 			args[f.name] = v
 		}
 	}
@@ -201,4 +249,27 @@ func argsForForm(spec actionSpec, vals map[string]string) (string, map[string]an
 		args["out"] = spec.outName
 	}
 	return spec.tool, args
+}
+
+// splitList parses a comma-separated value into a trimmed, non-empty []string.
+func splitList(v string) []string {
+	parts := strings.Split(v, ",")
+	list := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			list = append(list, s)
+		}
+	}
+	return list
+}
+
+// parseJSONField turns a form value into a JSON object for the worker. A valid
+// JSON object/value is used as-is; anything else is wrapped as {"text": value}
+// so a tool that requires an object (e.g. qa·scene's `plan`) always gets one.
+func parseJSONField(v string) any {
+	var obj map[string]any
+	if json.Unmarshal([]byte(v), &obj) == nil {
+		return obj
+	}
+	return map[string]any{"text": v}
 }
