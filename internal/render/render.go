@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -109,6 +110,7 @@ func fmtOrgMembers(raw json.RawMessage) (string, bool) {
 			Role        string `json:"role"`
 			Suspended   *bool  `json:"suspended"`
 			SuspendedAt any    `json:"suspended_at"`
+			Active      *bool  `json:"active"`
 		} `json:"members"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil || v.Members == nil {
@@ -120,8 +122,11 @@ func fmtOrgMembers(raw json.RawMessage) (string, bool) {
 	rows := make([][]string, 0, len(v.Members))
 	for _, m := range v.Members {
 		status := "active"
-		if (m.Suspended != nil && *m.Suspended) || (m.Suspended == nil && m.SuspendedAt != nil) {
+		switch {
+		case (m.Suspended != nil && *m.Suspended) || (m.Suspended == nil && m.SuspendedAt != nil):
 			status = "suspended"
+		case m.Active != nil && !*m.Active:
+			status = "inactive"
 		}
 		rows = append(rows, []string{orDash(m.Email), orDash(m.Role), status})
 	}
@@ -422,8 +427,8 @@ func credits(n *float64) string {
 
 // num renders a float without a trailing ".0" for whole numbers.
 func num(f float64) string {
-	if f == float64(int64(f)) {
-		return fmt.Sprintf("%d", int64(f))
+	if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {
+		return strconv.FormatFloat(f, 'f', 0, 64)
 	}
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }

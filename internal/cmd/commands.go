@@ -69,8 +69,11 @@ func newWhoamiCmd(cfg config.Config) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			id := aggregateIdentity(cmd, sess)
+			id, ok := aggregateIdentity(cmd, sess)
 			id.email = firstNonEmpty(sess.Email(), id.email)
+			if !ok {
+				return fmt.Errorf("couldn't reach your account — check your connection or run `framehood login`")
+			}
 			fmt.Print(id.render())
 			return nil
 		},
@@ -89,8 +92,9 @@ type identity struct {
 // aggregateIdentity gathers the caller's email/role/balance from billing
 // (balance) and the plan name from billing(plan). Each source is best-effort:
 // a failing tool just leaves its fields blank rather than erroring out.
-func aggregateIdentity(cmd *cobra.Command, sess *Session) identity {
+func aggregateIdentity(cmd *cobra.Command, sess *Session) (identity, bool) {
 	var id identity
+	var any bool
 	if raw, err := sess.Client().Balance(cmd.Context()); err == nil {
 		var b struct {
 			Balance any    `json:"balance"`
@@ -98,6 +102,7 @@ func aggregateIdentity(cmd *cobra.Command, sess *Session) identity {
 			Email   string `json:"email"`
 		}
 		if json.Unmarshal(raw, &b) == nil {
+			any = true
 			id.email, id.role = b.Email, b.Role
 			if b.Balance != nil {
 				id.balance = fmt.Sprintf("%v credits", b.Balance)
@@ -109,10 +114,11 @@ func aggregateIdentity(cmd *cobra.Command, sess *Session) identity {
 			Plan string `json:"plan"`
 		}
 		if json.Unmarshal(raw, &p) == nil {
+			any = true
 			id.plan = p.Plan
 		}
 	}
-	return id
+	return id, any
 }
 
 // render produces the labeled whoami block, omitting fields we couldn't fetch.
