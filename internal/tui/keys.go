@@ -111,8 +111,13 @@ func (h helpContext) ShortHelp() []key.Binding {
 // FullHelp lists every binding grouped — shown when `?` is toggled.
 func (h helpContext) FullHelp() [][]key.Binding {
 	k := h.keys
+	compose := []key.Binding{k.SlashOpen, k.ShiftTab, k.Tab}
+	if h.hasInputHistory {
+		compose = append(compose, k.HistPrev)
+	}
+	compose = append(compose, k.Generate, k.Esc)
 	return [][]key.Binding{
-		{k.SlashOpen, k.ShiftTab, k.Tab, k.HistPrev, k.Generate, k.Esc},
+		compose,
 		{k.Down, k.Open, k.Copy, k.Save, k.Use},
 		{k.Help, k.ForceQuit},
 	}
