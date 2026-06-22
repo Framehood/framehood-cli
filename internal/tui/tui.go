@@ -67,7 +67,7 @@ func fromPersisted(e persistedEntry) historyItem {
 
 // composerPlaceholder is the prompt-box hint shown in the default (non-form)
 // composer state.
-const composerPlaceholder = "type a prompt · / for commands · ⇧⇥ to change action"
+const composerPlaceholder = "type a prompt · / for commands · ⇥ to change action"
 
 // signedOutMsg is shown when an action needs auth but the studio is signed out.
 // It points at the in-TUI /login (no need to quit the studio anymore).
