@@ -67,7 +67,7 @@ func TestSubmit_BlocksEmptyPrompt(t *testing.T) {
 	m := newTestModel()
 	m.focus = zoneInput
 	m.action = findAction(t, "image", "create") // runnable, needs a prompt
-	m.input.SetValue("   ")                      // whitespace only
+	m.input.SetValue("   ")                     // whitespace only
 
 	nm, cmd := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
 	got := nm.(model)

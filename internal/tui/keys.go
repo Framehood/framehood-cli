@@ -8,15 +8,15 @@ import "github.com/charmbracelet/bubbles/key"
 // hunting.
 type keyMap struct {
 	// Palette
-	SlashOpen key.Binding // / — open slash-command palette (from empty input)
-	PaletteUp key.Binding // ↑ — navigate grid
-	PaletteDown key.Binding // ↓
-	PaletteLeft key.Binding // ←
+	SlashOpen    key.Binding // / — open slash-command palette (from empty input)
+	PaletteUp    key.Binding // ↑ — navigate grid
+	PaletteDown  key.Binding // ↓
+	PaletteLeft  key.Binding // ←
 	PaletteRight key.Binding // →
 
 	// Input / generation
-	Generate  key.Binding // enter — submit active action
-	Esc       key.Binding // esc — close palette / cancel form
+	Generate key.Binding // enter — submit active action
+	Esc      key.Binding // esc — close palette / cancel form
 
 	// Action selector (palette-closed): cycle the work-action ring.
 	ShiftTab key.Binding // shift+tab — next work action

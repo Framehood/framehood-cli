@@ -167,7 +167,7 @@ func TestImmediateFlagAllowlist(t *testing.T) {
 	allowlist := map[string]bool{
 		"billing.balance": true, "billing.plans": true, "billing.plan": true,
 		"files.list": true,
-		"org.info": true, "org.members": true, "org.spend": true,
+		"org.info":   true, "org.members": true, "org.spend": true,
 	}
 	for _, g := range catalog {
 		for _, a := range g.actions {

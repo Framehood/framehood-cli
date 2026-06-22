@@ -100,9 +100,9 @@ var catalog = []toolGroup{
 		{"billing", "request_upgrade", "ask the owner to upgrade", kindManage, "", "", nil, false},
 	}},
 	{"org", "Organization", []actionSpec{
-		{"org", "info", "organization info", kindRead, "", "", nil, true},    // immediate
-		{"org", "members", "list members", kindRead, "", "", nil, true},      // immediate
-		{"org", "spend", "spend report", kindRead, "", "", nil, true},        // immediate
+		{"org", "info", "organization info", kindRead, "", "", nil, true}, // immediate
+		{"org", "members", "list members", kindRead, "", "", nil, true},   // immediate
+		{"org", "spend", "spend report", kindRead, "", "", nil, true},     // immediate
 		{"org", "invite", "invite a member", kindManage, "", "", []string{"email"}, false},
 		{"org", "remove", "remove a member", kindManage, "", "", []string{"email"}, false},
 	}},

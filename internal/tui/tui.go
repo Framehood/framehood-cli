@@ -108,13 +108,13 @@ type model struct {
 	email    string
 	loggedIn bool
 
-	input   textinput.Model
-	spin    spinner.Model
-	help    help.Model
-	hist    table.Model
-	keys    keyMap
-	focus   focusZone
-	action  actionSpec // currently selected action (shown in composer header)
+	input         textinput.Model
+	spin          spinner.Model
+	help          help.Model
+	hist          table.Model
+	keys          keyMap
+	focus         focusZone
+	action        actionSpec // currently selected action (shown in composer header)
 	inflight      actionSpec // action captured at submit time (for history attribution)
 	inflightLabel string     // the submitted prompt/summary, for the history row
 

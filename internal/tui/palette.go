@@ -10,9 +10,9 @@ import (
 type commandKind int
 
 const (
-	cmdImmediate  commandKind = iota // execute right away (meta commands)
-	cmdNeedsPrompt                   // close palette, set action, wait for text + enter
-	cmdNeedsForm                     // close palette, open the per-param form flow
+	cmdImmediate   commandKind = iota // execute right away (meta commands)
+	cmdNeedsPrompt                    // close palette, set action, wait for text + enter
+	cmdNeedsForm                      // close palette, open the per-param form flow
 )
 
 // paletteCmd is a single selectable entry in the slash-command palette.
@@ -80,11 +80,11 @@ var allPaletteCmds = buildPaletteCmds()
 // paletteState holds all mutable state for the slash-command palette overlay.
 type paletteState struct {
 	open    bool
-	query   string   // text after the leading /
-	matches []int    // indices into allPaletteCmds
-	sel     int      // selected index within matches
-	cols    int      // number of columns last computed
-	colW    int      // width per cell (fixed)
+	query   string // text after the leading /
+	matches []int  // indices into allPaletteCmds
+	sel     int    // selected index within matches
+	cols    int    // number of columns last computed
+	colW    int    // width per cell (fixed)
 }
 
 // open returns true when the palette is visible.
@@ -178,8 +178,8 @@ func (p *paletteState) moveUp() {
 // --- rendering ---
 
 const (
-	paletteCellInner = 16 // visible text area per cell (title truncated here)
-	paletteCellPad   = 2  // padding left+right inside the cell
+	paletteCellInner = 16                                      // visible text area per cell (title truncated here)
+	paletteCellPad   = 2                                       // padding left+right inside the cell
 	paletteCellTotal = paletteCellInner + paletteCellPad*2 + 2 // +2 for border chars
 )
 
@@ -243,7 +243,7 @@ func (p *paletteState) View(width int) string {
 			queryLine,
 			styDim.Render("  no matches"),
 		)
-		return styPaletteBox.Width(width-4).Render(inner)
+		return styPaletteBox.Width(width - 4).Render(inner)
 	}
 
 	// Build grid rows.
@@ -279,5 +279,5 @@ func (p *paletteState) View(width int) string {
 		"",
 		hint,
 	)
-	return styPaletteBox.Width(width-4).Render(inner)
+	return styPaletteBox.Width(width - 4).Render(inner)
 }

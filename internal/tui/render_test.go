@@ -22,7 +22,7 @@ func newTestModel() model {
 	m := model{
 		email: "kirill@framehood.ai", loggedIn: true, input: ti, spin: sp,
 		help: help.New(), hist: newHistoryTable(), keys: defaultKeys(),
-		action: catalog[0].actions[0],
+		action:  catalog[0].actions[0],
 		balance: "1,640 credits", width: 78,
 		history: []historyItem{{kind: "image·create", prompt: "a red fox in the snow"}},
 	}
