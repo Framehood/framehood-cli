@@ -19,15 +19,13 @@ func newTestModel() model {
 	ti := textinput.New()
 	ti.SetValue("a red fox in the snow")
 	sp := spinner.New()
-	nav, groupTop := buildNav()
 	m := model{
 		email: "kirill@framehood.ai", loggedIn: true, input: ti, spin: sp,
 		help: help.New(), hist: newHistoryTable(), keys: defaultKeys(),
-		nav: nav, groupTop: groupTop, action: catalog[0].actions[0],
+		action:  catalog[0].actions[0],
 		balance: "1,640 credits", width: 78,
 		history: []historyItem{{kind: "image·create", prompt: "a red fox in the snow"}},
 	}
-	m.nav.SetSize(74, 8)
 	m.rebuildHistory(true)
 	return m
 }

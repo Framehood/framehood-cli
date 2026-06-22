@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,16 +26,18 @@ func findAction(t *testing.T, tool, action string) actionSpec {
 func TestSubmit_GuardsNonRunnable(t *testing.T) {
 	m := newTestModel()
 	m.focus = zoneInput
-	m.action = findAction(t, "image", "edit") // needs image_url → not runnable
+	m.action = findAction(t, "image", "edit") // needs image_url → not runnable, has form
 	m.input.SetValue("make it pop")
 
 	nm, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
 	got := nm.(model)
 	if got.phase == phaseWorking {
-		t.Error("a non-runnable action must not start a job")
+		t.Error("a non-runnable action must not start a job directly from the prompt")
 	}
-	if got.focus != zoneTabs {
-		t.Errorf("should route back to NAV, focus=%v", got.focus)
+	// New behaviour: pressing enter on a form-driven action enters form mode
+	// (rather than routing back to the NAV zone which no longer exists).
+	if len(got.formFields) == 0 {
+		t.Error("enter on form-driven action should open the form (formFields non-empty)")
 	}
 }
 
@@ -54,6 +57,150 @@ func TestSubmit_RunnableCapturesInflight(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("expected a submit command")
+	}
+}
+
+// TestSubmit_BlocksEmptyPrompt verifies a needs-prompt work action does not
+// submit when the prompt box is empty (or whitespace), and sets a "needs:"
+// notice instead.
+func TestSubmit_BlocksEmptyPrompt(t *testing.T) {
+	m := newTestModel()
+	m.focus = zoneInput
+	m.action = findAction(t, "image", "create") // runnable, needs a prompt
+	m.input.SetValue("   ")                     // whitespace only
+
+	nm, cmd := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
+	got := nm.(model)
+	if got.phase == phaseWorking {
+		t.Error("must not submit a runnable action with an empty prompt")
+	}
+	if cmd != nil {
+		t.Error("no submit command should be issued for an empty prompt")
+	}
+	if got.notice == "" {
+		t.Error("an empty required prompt should set a 'needs:' notice")
+	}
+	if !strings.Contains(got.notice, "needs") {
+		t.Errorf("notice = %q, want it to mention what's needed", got.notice)
+	}
+
+	// A non-empty prompt on the same action DOES submit.
+	m2 := newTestModel()
+	m2.focus = zoneInput
+	m2.action = findAction(t, "image", "create")
+	m2.input.SetValue("a red fox")
+	nm2, cmd2 := m2.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
+	if nm2.(model).phase != phaseWorking || cmd2 == nil {
+		t.Error("a non-empty prompt should submit the work action")
+	}
+}
+
+// TestSubmit_FormBlocksMissingRequired verifies a needs-form action does not
+// submit while a required field is empty, and that submitForm itself guards.
+func TestSubmit_FormBlocksMissingRequired(t *testing.T) {
+	// image.edit needs image_url + prompt.
+	m := newTestModel().startForm(findAction(t, "image", "edit"))
+	m.formVals = map[string]string{"image_url": "https://x/i.jpg", "prompt": ""}
+
+	nm, cmd := m.submitForm()
+	got := nm.(model)
+	if got.phase == phaseWorking {
+		t.Error("submitForm must not submit with a missing required field")
+	}
+	if cmd != nil {
+		t.Error("submitForm must not issue a command when a field is missing")
+	}
+	if !strings.Contains(got.notice, "needs") {
+		t.Errorf("notice = %q, want a 'needs:' list", got.notice)
+	}
+
+	// Fill the missing field → it submits.
+	got.formFields = m.formFields // submitForm cleared nothing on the blocked path
+	got.formVals["prompt"] = "make it night"
+	nm2, cmd2 := got.submitForm()
+	if nm2.(model).phase != phaseWorking || cmd2 == nil {
+		t.Error("submitForm should submit once all required fields are filled")
+	}
+}
+
+// formlessRingActions returns every work-ring action that is neither
+// prompt-runnable nor form-backed — the set that would crash startForm by
+// indexing an empty []paramSpec. Derived from live state so it can't drift.
+func formlessRingActions() []actionSpec {
+	var out []actionSpec
+	for _, a := range workActions {
+		if !a.runnable() && !a.hasForm() {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// TestStartForm_FormlessActionsFailSafe is the regression test for the round-3
+// startForm panic: cycling Shift+Tab (or selecting from the `/` palette) to a
+// ring action that has no prompt path AND no form must NOT panic. startForm
+// must fail safe — set a helpful notice, open no form, and keep input focus.
+func TestStartForm_FormlessActionsFailSafe(t *testing.T) {
+	actions := formlessRingActions()
+	if len(actions) == 0 {
+		t.Fatal("expected some form-less ring actions to exercise the guard")
+	}
+	for _, a := range actions {
+		a := a
+		t.Run(a.tool+"."+a.action, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("startForm(%s·%s) panicked: %v", a.tool, a.action, r)
+				}
+			}()
+			m := newTestModel().startForm(a)
+			if len(m.formFields) != 0 {
+				t.Errorf("%s·%s: form mode should NOT open (got %d fields)",
+					a.tool, a.action, len(m.formFields))
+			}
+			if m.notice == "" {
+				t.Errorf("%s·%s: expected a 'not yet available' notice", a.tool, a.action)
+			}
+			if !strings.Contains(m.notice, "not yet available") {
+				t.Errorf("%s·%s: notice = %q, want it to flag the action as unavailable",
+					a.tool, a.action, m.notice)
+			}
+			if m.focus != zoneInput {
+				t.Errorf("%s·%s: focus = %v, want zoneInput", a.tool, a.action, m.focus)
+			}
+			if m.phase == phaseWorking {
+				t.Errorf("%s·%s: a form-less action must not start a job", a.tool, a.action)
+			}
+		})
+	}
+}
+
+// TestEnterOnFormlessAction_NoPanic exercises the realistic path: the action is
+// active (as if reached via Shift+Tab), the user types something and presses
+// Enter. updateInput routes a non-runnable action to startForm, which must fail
+// safe rather than panic.
+func TestEnterOnFormlessAction_NoPanic(t *testing.T) {
+	for _, a := range formlessRingActions() {
+		a := a
+		t.Run(a.tool+"."+a.action, func(t *testing.T) {
+			m := newTestModel()
+			m.focus = zoneInput
+			m.action = a
+			m.input.SetValue("anything")
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Enter on %s·%s panicked: %v", a.tool, a.action, r)
+				}
+			}()
+			nm, cmd := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
+			got := nm.(model)
+			if got.phase == phaseWorking || cmd != nil {
+				t.Errorf("%s·%s: must not submit a job", a.tool, a.action)
+			}
+			if got.notice == "" {
+				t.Errorf("%s·%s: expected a notice", a.tool, a.action)
+			}
+		})
 	}
 }
 
@@ -156,5 +303,60 @@ func TestChainSeedsForm(t *testing.T) {
 	// field 0 input should show the seeded value
 	if m.input.Value() != "https://cdn.framehood.ai/prev.mp4" {
 		t.Errorf("field 0 input = %q, want the seed", m.input.Value())
+	}
+}
+
+// TestSeedURLClearedOnAbandon verifies a pending chain (seedURL set by "use as
+// input") is dropped on every path that does NOT open a consuming form, so it
+// can't silently prefill an unrelated form opened later.
+func TestSeedURLClearedOnAbandon(t *testing.T) {
+	const seed = "https://cdn.framehood.ai/chain.mp4"
+
+	// (a) Esc out of the palette abandons the chain.
+	m := newTestModel()
+	m.seedURL = seed
+	m.palette = openPaletteState()
+	nm, _ := m.updatePalette(tea.KeyMsg{Type: tea.KeyEsc})
+	if got := nm.(model).seedURL; got != "" {
+		t.Errorf("palette Esc: seedURL = %q, want cleared", got)
+	}
+
+	// (b) A meta command (/help) abandons the chain.
+	m = newTestModel()
+	m.seedURL = seed
+	help := paletteCmdByID(t, "/help")
+	nmh, _ := m.runPaletteCmd(&help)
+	if got := nmh.(model).seedURL; got != "" {
+		t.Errorf("meta cmd: seedURL = %q, want cleared", got)
+	}
+
+	// (c) A prompt-only action (image·create) abandons the chain (it takes no
+	// media URL).
+	m = newTestModel()
+	m.seedURL = seed
+	create := paletteCmdByID(t, "image·create")
+	nmc, _ := m.runPaletteCmd(&create)
+	if got := nmc.(model).seedURL; got != "" {
+		t.Errorf("prompt-only action: seedURL = %q, want cleared", got)
+	}
+
+	// (d) A form-less action (video·scene) abandons the chain.
+	m = newTestModel()
+	m.seedURL = seed
+	m = m.startForm(findAction(t, "video", "scene"))
+	if m.seedURL != "" {
+		t.Errorf("form-less action: seedURL = %q, want cleared", m.seedURL)
+	}
+
+	// End-to-end: after abandoning via Esc, opening an UNRELATED form must NOT
+	// prefill its media field with the stale URL.
+	m = newTestModel()
+	m.seedURL = seed
+	m.palette = openPaletteState()
+	esc, _ := m.updatePalette(tea.KeyMsg{Type: tea.KeyEsc})
+	m = esc.(model)
+	m = m.startForm(findAction(t, "image", "edit")) // image_url + prompt
+	if m.formVals["image_url"] == seed {
+		t.Error("stale seedURL leaked into an unrelated form's media field")
 	}
 }

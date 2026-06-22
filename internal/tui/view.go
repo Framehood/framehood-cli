@@ -29,8 +29,12 @@ func (m model) View() string {
 	var sections []string
 
 	sections = append(sections, m.headerView(w))
-	sections = append(sections, m.navView())
 	sections = append(sections, m.composerView(w))
+
+	// Palette overlay sits directly below the composer.
+	if m.palette.isOpen() {
+		sections = append(sections, m.palette.View(w))
+	}
 
 	if body := m.statusView(w); body != "" {
 		sections = append(sections, body)
@@ -38,13 +42,15 @@ func (m model) View() string {
 	if h := m.historyView(); h != "" {
 		sections = append(sections, h)
 	}
+
 	sel, selOK := m.selectedItem()
 	hc := helpContext{
-		keys:      m.keys,
-		focus:     m.focus,
-		working:   m.phase == phaseWorking,
-		hasResult: selOK && sel.url != "",
-		hasRows:   len(m.rows) > 0,
+		keys:        m.keys,
+		focus:       m.focus,
+		paletteOpen: m.palette.isOpen(),
+		working:     m.phase == phaseWorking,
+		hasResult:   selOK && sel.url != "",
+		hasRows:     len(m.rows) > 0,
 	}
 	sections = append(sections, "\n"+m.help.View(hc))
 
@@ -52,9 +58,14 @@ func (m model) View() string {
 	return lipgloss.NewStyle().Padding(1, 1).Render(out)
 }
 
-// Header: title on the left, account/balance (or signed-out) on the right, then a rule.
+// Header: title on the left, account/balance (or signed-out) on the right.
 func (m model) headerView(w int) string {
-	left := styTitle.Render("✦ Framehood") + styDim.Render(" studio")
+	// Active work-action chip (Shift+Tab cycles it).
+	actionChip := styChipActive.Render(m.action.tool + " · " + m.action.action)
+
+	left := styTitle.Render("✦ Framehood") + styDim.Render(" studio") +
+		styDim.Render("  ") + actionChip
+
 	var right string
 	if !m.loggedIn {
 		right = styRed.Render("● not signed in")
@@ -74,23 +85,11 @@ func (m model) headerView(w int) string {
 	return bar + "\n" + rule
 }
 
-// navView shows the tool→action catalog. When the NAV pane is focused it's the
-// full browsable/filterable list; otherwise it collapses to the active action
-// chip so the rest of the studio has room.
-func (m model) navView() string {
-	if m.focus == zoneTabs {
-		return "\n" + m.nav.View()
-	}
-	chip := styChipActive.Render(m.action.tool + " · " + m.action.action)
-	hint := styDim.Render("  tab to change")
-	return "\n" + styDim.Render("  ") + chip + hint
-}
-
-// Composer: eyebrow label + bordered input. In form mode it renders the action's
-// fields (the active one editable); otherwise it's the single prompt box.
+// composerView: the prompt input (or form in form mode). The active action is
+// shown as an eyebrow label.
 func (m model) composerView(w int) string {
 	box := styPanel
-	if m.focus == zoneInput && m.phase != phaseWorking {
+	if m.focus == zoneInput && m.phase != phaseWorking && !m.palette.isOpen() {
 		box = styPanelActive
 	}
 	if len(m.formFields) > 0 {
@@ -165,10 +164,14 @@ func (m model) statusView(w int) string {
 		return "\n" + styPanel.BorderForeground(colRed).Width(w-4).Render(
 			styRed.Render("✗ ")+styText.Render(m.errMsg))
 	}
+	// Show notice even in idle state (e.g. after copy/save from palette).
+	if m.notice != "" {
+		return "\n" + m.notice
+	}
 	return ""
 }
 
-// Recent generations (most recent first, up to 5).
+// historyView: recent generations table (most recent first).
 func (m model) historyView() string {
 	if len(m.rows) == 0 {
 		return ""

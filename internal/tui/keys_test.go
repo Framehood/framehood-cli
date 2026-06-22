@@ -2,7 +2,8 @@ package tui
 
 import "testing"
 
-// helpListed reports whether a binding with the given primary key is present.
+// helpListed reports whether a binding with the given primary key is present
+// in the short help for the given context.
 func helpListed(hc helpContext, primary string) bool {
 	for _, b := range hc.ShortHelp() {
 		for _, k := range b.Keys() {
@@ -17,17 +18,32 @@ func helpListed(hc helpContext, primary string) bool {
 func TestShortHelp_FocusAware(t *testing.T) {
 	k := defaultKeys()
 
-	// Input zone: q and ? are typed into the prompt, so the bar must NOT list
-	// them as commands (regression guard for the typed-key conflict).
+	// Input zone (primary surface): must advertise /, shift+tab, enter.
+	// q must NOT appear (not a bound key here).
 	in := helpContext{keys: k, focus: zoneInput}
 	if helpListed(in, "q") {
-		t.Error("input zone help must not advertise q (it types a literal q)")
+		t.Error("input zone help must not advertise q")
 	}
-	if helpListed(in, "?") {
-		t.Error("input zone help must not advertise ? (it types a literal ?)")
+	if !helpListed(in, "/") {
+		t.Error("input zone help should list / (open palette)")
 	}
-	if !helpListed(in, "enter") || !helpListed(in, "esc") {
-		t.Error("input zone help should list enter + esc")
+	if !helpListed(in, "shift+tab") {
+		t.Error("input zone help should list shift+tab (next action)")
+	}
+	if !helpListed(in, "tab") {
+		t.Error("input zone help should list tab (prev action — reverse cycle)")
+	}
+	if !helpListed(in, "enter") {
+		t.Error("input zone help should list enter (generate)")
+	}
+
+	// Palette open: must advertise enter (run) and esc (close).
+	pal := helpContext{keys: k, paletteOpen: true}
+	if !helpListed(pal, "enter") {
+		t.Error("palette help should list enter (run command)")
+	}
+	if !helpListed(pal, "esc") {
+		t.Error("palette help should list esc (close palette)")
 	}
 
 	// Output zone: o (open) only when there is a result.
@@ -38,14 +54,5 @@ func TestShortHelp_FocusAware(t *testing.T) {
 	withResult := helpContext{keys: k, focus: zoneOutput, hasResult: true}
 	if !helpListed(withResult, "o") {
 		t.Error("output zone with a result should advertise o")
-	}
-
-	// Tabs (NAV) zone lists the action picker keys: write (enter) + the palette.
-	tabs := helpContext{keys: k, focus: zoneTabs}
-	if !helpListed(tabs, "enter") {
-		t.Error("tabs zone help should list enter (pick action)")
-	}
-	if !helpListed(tabs, ":") {
-		t.Error("tabs zone help should list : (find action)")
 	}
 }
