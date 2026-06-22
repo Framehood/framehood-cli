@@ -11,6 +11,7 @@ import (
 	"github.com/Framehood/framehood-cli/internal/auth"
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/mcp"
+	"github.com/Framehood/framehood-cli/internal/render"
 	"github.com/spf13/cobra"
 )
 
@@ -62,34 +63,82 @@ func newLogoutCmd(cfg config.Config) *cobra.Command {
 func newWhoamiCmd(cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
-		Short: "Show the signed-in account and credit balance",
+		Short: "Show your account: email, org role, balance and plan",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sess, err := NewSession(cfg)
 			if err != nil {
 				return err
 			}
-			bal, balErr := sess.Client().Balance(cmd.Context())
-			who := sess.Email()
-			if who == "" && balErr == nil {
-				// The login flow doesn't always capture the email; billing(balance)
-				// returns it, so fall back to that.
-				var b struct {
-					Email string `json:"email"`
-				}
-				if json.Unmarshal(bal, &b) == nil && b.Email != "" {
-					who = b.Email
-				}
-			}
-			if who == "" {
-				who = "(unknown email)"
-			}
-			fmt.Printf("Signed in as %s\n", who)
-			if balErr == nil {
-				fmt.Printf("Balance: %s\n", prettyInline(bal))
-			}
+			id := aggregateIdentity(cmd, sess)
+			id.email = firstNonEmpty(sess.Email(), id.email)
+			fmt.Print(id.render())
 			return nil
 		},
 	}
+}
+
+// identity is the aggregated whoami view, drawn from billing(balance) +
+// billing(plan).
+type identity struct {
+	email   string
+	role    string
+	balance string
+	plan    string
+}
+
+// aggregateIdentity gathers the caller's email/role/balance from billing
+// (balance) and the plan name from billing(plan). Each source is best-effort:
+// a failing tool just leaves its fields blank rather than erroring out.
+func aggregateIdentity(cmd *cobra.Command, sess *Session) identity {
+	var id identity
+	if raw, err := sess.Client().Balance(cmd.Context()); err == nil {
+		var b struct {
+			Balance any    `json:"balance"`
+			Role    string `json:"role"`
+			Email   string `json:"email"`
+		}
+		if json.Unmarshal(raw, &b) == nil {
+			id.email, id.role = b.Email, b.Role
+			if b.Balance != nil {
+				id.balance = fmt.Sprintf("%v credits", b.Balance)
+			}
+		}
+	}
+	if raw, err := sess.Client().Plan(cmd.Context()); err == nil {
+		var p struct {
+			Plan string `json:"plan"`
+		}
+		if json.Unmarshal(raw, &p) == nil {
+			id.plan = p.Plan
+		}
+	}
+	return id
+}
+
+// render produces the labeled whoami block, omitting fields we couldn't fetch.
+func (id identity) render() string {
+	email := id.email
+	if email == "" {
+		email = "(unknown email)"
+	}
+	out := "Email:   " + email + "\n"
+	if id.role != "" {
+		out += "Role:    " + id.role + "\n"
+	}
+	if id.balance != "" {
+		out += "Balance: " + id.balance + "\n"
+	}
+	if id.plan != "" {
+		out += "Plan:    " + id.plan + "\n"
+	}
+	return out
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // --- balance ---
@@ -107,7 +156,11 @@ func newBalanceCmd(cfg config.Config) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Println(prettyInline(bal))
+			if out, ok := render.Readable("billing", "balance", bal); ok {
+				fmt.Println(out)
+			} else {
+				fmt.Println(render.PrettyJSON(bal))
+			}
 			return nil
 		},
 	}

@@ -99,8 +99,10 @@ func (m model) runLogout() (tea.Model, tea.Cmd) {
 	return m.setFocus(zoneInput), nil
 }
 
-// runWhoami handles the `/whoami` palette command: it shows the signed-in
-// account and current balance as an immediate notice.
+// runWhoami handles the `/whoami` palette command: it shows the signed-in email
+// as a notice and fetches billing(plan) — which carries plan, status, role and
+// balance — into the READ panel (rendered readably by the formatter). Aggregated
+// across what the model already knows (email) + the live plan fetch.
 func (m model) runWhoami() (tea.Model, tea.Cmd) {
 	if !m.loggedIn {
 		m.notice = styRed.Render("not signed in · /login to sign in")
@@ -111,5 +113,15 @@ func (m model) runWhoami() (tea.Model, tea.Cmd) {
 		who = "signed in"
 	}
 	m.notice = styAcc.Render(who) + styDim.Render("  ·  ") + styAcc.Render(m.balance)
-	return m.setFocus(zoneInput), nil
+
+	// Fetch plan/status/role/balance into the READ panel via the immediate path.
+	m.phase = phaseWorking
+	m.status = "running"
+	m.result, m.errMsg, m.jobID = "", "", ""
+	m.readData, m.readHdr = "", ""
+	m.genFrame = 0
+	m.started = time.Now()
+	label := "billing·plan"
+	m.inflightLabel = label
+	return m.setFocus(zoneInput), tea.Batch(m.spin.Tick, immediateCmd(m.client, label, "billing", map[string]any{"action": "plan"}))
 }

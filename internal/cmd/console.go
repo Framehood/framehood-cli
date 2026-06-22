@@ -5,10 +5,12 @@ import (
 	"strings"
 
 	"github.com/Framehood/framehood-cli/internal/config"
+	"github.com/Framehood/framehood-cli/internal/render"
 	"github.com/spf13/cobra"
 )
 
-// callTool invokes an MCP tool and prints its JSON payload.
+// callTool invokes an MCP tool and prints its payload as human-readable text
+// (per-tool/action formatter), falling back to pretty JSON for unknown shapes.
 func callTool(cmd *cobra.Command, cfg config.Config, tool string, args map[string]any) error {
 	sess, err := NewSession(cfg)
 	if err != nil {
@@ -18,7 +20,12 @@ func callTool(cmd *cobra.Command, cfg config.Config, tool string, args map[strin
 	if err != nil {
 		return err
 	}
-	fmt.Println(prettyInline(raw))
+	action, _ := args["action"].(string)
+	if out, ok := render.Readable(tool, action, raw); ok {
+		fmt.Println(out)
+	} else {
+		fmt.Println(render.PrettyJSON(raw))
+	}
 	return nil
 }
 
