@@ -77,6 +77,81 @@ func buildPaletteCmds() []paletteCmd {
 // allPaletteCmds is the static master list (built once at startup).
 var allPaletteCmds = buildPaletteCmds()
 
+// commandNames is the lookup used to resolve a typed/pasted slash command to a
+// palette command. It maps a normalized name (lowercase, space-joined tokens)
+// to the command index in allPaletteCmds. Built once from:
+//   - meta commands: their id without the leading "/" ("help", "setdir", …);
+//   - catalog commands: the two-token "tool action" ("files list", "image
+//     create", …) AND a single-token alias = the action name when that action
+//     name is unique across the whole catalog ("balance" → billing·balance).
+//
+// Multi-name entries let "/balance" and "/billing balance" both resolve.
+var commandNames = buildCommandNames()
+
+func buildCommandNames() map[string]int {
+	names := make(map[string]int)
+
+	// Count action-name occurrences across catalog so we only alias unique ones.
+	actionCount := map[string]int{}
+	for i := range allPaletteCmds {
+		if s := allPaletteCmds[i].spec; s != nil {
+			actionCount[s.action]++
+		}
+	}
+
+	for i := range allPaletteCmds {
+		c := &allPaletteCmds[i]
+		if c.spec == nil {
+			// Meta command: "/setdir" → "setdir".
+			name := strings.ToLower(strings.TrimPrefix(c.id, "/"))
+			if name != "" {
+				names[name] = i
+			}
+			continue
+		}
+		// Catalog command: "files list".
+		full := strings.ToLower(c.spec.tool + " " + c.spec.action)
+		names[full] = i
+		// Single-word alias only when the action name is globally unique.
+		if actionCount[c.spec.action] == 1 {
+			alias := strings.ToLower(c.spec.action)
+			if _, taken := names[alias]; !taken {
+				names[alias] = i
+			}
+		}
+	}
+	return names
+}
+
+// resolveSlashInput parses a compose-box value that starts with "/" into a
+// palette command plus the remainder (the text after the matched command name,
+// used as a prompt/arg). It matches the LONGEST leading token sequence (up to
+// two tokens) against commandNames. Returns ok=false when the text doesn't
+// resolve to a command (callers then fall back to the highlighted item).
+func resolveSlashInput(input string) (cmd *paletteCmd, remainder string, ok bool) {
+	s := strings.TrimSpace(input)
+	if !strings.HasPrefix(s, "/") {
+		return nil, "", false
+	}
+	body := strings.TrimSpace(s[1:])
+	if body == "" {
+		return nil, "", false
+	}
+	fields := strings.Fields(body)
+	// Try the longest leading name first (two tokens), then one token.
+	for n := 2; n >= 1; n-- {
+		if len(fields) < n {
+			continue
+		}
+		name := strings.ToLower(strings.Join(fields[:n], " "))
+		if idx, found := commandNames[name]; found {
+			rem := strings.TrimSpace(strings.Join(fields[n:], " "))
+			return &allPaletteCmds[idx], rem, true
+		}
+	}
+	return nil, "", false
+}
+
 // paletteState holds all mutable state for the slash-command palette overlay.
 type paletteState struct {
 	open    bool
@@ -117,6 +192,19 @@ func columnsFor(width int) int {
 // a throwaway copy, leaving the real model's cols at 0 and breaking ↑/↓ nav.
 func (p *paletteState) layout(width int) {
 	p.cols = columnsFor(width)
+}
+
+// syncFromInput derives the palette filter query from the live compose-box
+// value (which holds the leading "/" + the typed text) and refilters. The
+// query is the text after the leading "/", with a leading space trimmed so
+// "/  files" still filters on "files".
+func (p *paletteState) syncFromInput(input string) {
+	q := input
+	if i := strings.IndexByte(q, '/'); i >= 0 {
+		q = q[i+1:]
+	}
+	p.query = strings.TrimLeft(q, " ")
+	p.refilter()
 }
 
 // refilter rebuilds the matches slice for the current query (case-insensitive

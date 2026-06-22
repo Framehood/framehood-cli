@@ -244,16 +244,27 @@ func TestPaletteOpenClose(t *testing.T) {
 	}
 }
 
-// TestPaletteQueryTyping verifies that typing characters in palette mode
-// updates the query and refilters.
+// TestPaletteQueryTyping verifies that typing characters in palette mode edits
+// the live compose input and re-syncs the palette filter from it (the query
+// lives in the input box, not a separate field).
 func TestPaletteQueryTyping(t *testing.T) {
 	m := newTestModel()
-	m.palette = openPaletteState()
+	m.input.Focus() // production focuses the compose input at startup
+	// Open the palette via the real "/" path so the input holds "/".
+	m.input.SetValue("")
+	op, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = op.(model)
+	if !m.palette.isOpen() || m.input.Value() != "/" {
+		t.Fatalf("'/' should open palette with input '/': open=%v input=%q", m.palette.isOpen(), m.input.Value())
+	}
 	initial := len(m.palette.matches)
 
-	// Type "v" — should narrow to video + any commands containing "v".
+	// Type "v" — the input becomes "/v" and the palette filters on "v".
 	nm, _ := m.updatePalette(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	got := nm.(model)
+	if got.input.Value() != "/v" {
+		t.Errorf("input = %q, want '/v'", got.input.Value())
+	}
 	if got.palette.query != "v" {
 		t.Errorf("query = %q, want 'v'", got.palette.query)
 	}
@@ -261,13 +272,26 @@ func TestPaletteQueryTyping(t *testing.T) {
 		t.Errorf("typing 'v' should narrow results: before=%d after=%d", initial, len(got.palette.matches))
 	}
 
-	// Backspace should restore the empty query.
+	// Backspace removes the 'v' → back to "/" and the full match set.
 	nm2, _ := got.updatePalette(tea.KeyMsg{Type: tea.KeyBackspace})
 	got2 := nm2.(model)
+	if got2.input.Value() != "/" {
+		t.Errorf("after backspace input = %q, want '/'", got2.input.Value())
+	}
 	if got2.palette.query != "" {
 		t.Errorf("after backspace query = %q, want ''", got2.palette.query)
 	}
 	if len(got2.palette.matches) != initial {
 		t.Errorf("after backspace matches = %d, want %d (initial)", len(got2.palette.matches), initial)
+	}
+
+	// Backspacing away the leading "/" closes the palette back to plain compose.
+	nm3, _ := got2.updatePalette(tea.KeyMsg{Type: tea.KeyBackspace})
+	got3 := nm3.(model)
+	if got3.palette.isOpen() {
+		t.Error("removing the leading '/' should close the palette")
+	}
+	if got3.focus != zoneInput {
+		t.Errorf("focus after closing = %v, want zoneInput", got3.focus)
 	}
 }

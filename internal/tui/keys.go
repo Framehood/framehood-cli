@@ -19,8 +19,9 @@ type keyMap struct {
 	Esc      key.Binding // esc — close palette / cancel form
 
 	// Action selector (palette-closed): cycle the work-action ring.
-	ShiftTab key.Binding // shift+tab — next work action
-	Tab      key.Binding // tab — previous work action
+	// Plain Tab is the primary (forward) cycle; Shift+Tab reverses it.
+	Tab      key.Binding // tab — next work action
+	ShiftTab key.Binding // shift+tab — previous work action
 
 	// Input-compose history recall (palette closed, input focused).
 	HistPrev key.Binding // ↑ — recall older submitted prompt
@@ -52,8 +53,8 @@ func defaultKeys() keyMap {
 		Generate: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "generate")),
 		Esc:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close/cancel")),
 
-		ShiftTab: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "next action")),
-		Tab:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "prev action")),
+		Tab:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "next action")),
+		ShiftTab: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "prev action")),
 
 		HistPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑↓", "history")),
 		HistNext: key.NewBinding(key.WithKeys("down")),
@@ -104,7 +105,7 @@ func (h helpContext) ShortHelp() []key.Binding {
 		}
 		return append(b, k.Help, k.ForceQuit)
 	default: // zoneInput (primary surface)
-		b := []key.Binding{k.SlashOpen, k.ShiftTab, k.Tab}
+		b := []key.Binding{k.SlashOpen, k.Tab, k.ShiftTab}
 		if h.hasInputHistory {
 			b = append(b, k.HistPrev) // ↑↓ history
 		}
@@ -115,7 +116,7 @@ func (h helpContext) ShortHelp() []key.Binding {
 // FullHelp lists every binding grouped — shown when `?` is toggled.
 func (h helpContext) FullHelp() [][]key.Binding {
 	k := h.keys
-	compose := []key.Binding{k.SlashOpen, k.ShiftTab, k.Tab}
+	compose := []key.Binding{k.SlashOpen, k.Tab, k.ShiftTab}
 	if h.hasInputHistory {
 		compose = append(compose, k.HistPrev)
 	}
