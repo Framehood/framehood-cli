@@ -132,6 +132,10 @@ type model struct {
 	formVals   map[string]string
 	seedURL    string // a result URL to chain into the next form's first media field
 
+	// inputHist is the shell-style prompt-recall buffer driven by ↑/↓ in the
+	// compose box (palette closed, input focused). Session-only.
+	inputHist inputHistory
+
 	phase   phase
 	status  string
 	balance string
@@ -835,6 +839,23 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		return m, nil
 
+	case key.Matches(msg, m.keys.HistPrev): // ↑ — recall an older prompt
+		// Single-line textinput doesn't use ↑/↓ for cursor movement, so we own
+		// them here for shell-style history recall. Always return — never fall
+		// through to textinput.Update.
+		if val, ok := m.inputHist.prev(m.input.Value()); ok {
+			m.input.SetValue(val)
+			m.input.CursorEnd()
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.HistNext): // ↓ — recall newer / restore draft
+		if val, ok := m.inputHist.next(); ok {
+			m.input.SetValue(val)
+			m.input.CursorEnd()
+		}
+		return m, nil
+
 	case msg.String() == "/" && strings.TrimSpace(m.input.Value()) == "":
 		// Open the palette when the input is empty or the typed char is '/'.
 		m.input.SetValue("")
@@ -872,6 +893,7 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.notice = styRed.Render("needs: " + m.actionNeeds())
 			return m, nil
 		}
+		m.inputHist.add(prompt) // record for ↑/↓ recall (dedup + cap inside)
 		m.phase = phaseWorking
 		m.status = "submitting"
 		m.result, m.errMsg, m.jobID = "", "", ""
@@ -883,6 +905,9 @@ func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.phase != phaseWorking {
+		// Any editing keystroke leaves history-navigation mode, so the next ↑
+		// starts from the newest entry again (and the saved draft is dropped).
+		m.inputHist.reset()
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
