@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/Framehood/framehood-cli/internal/mcp"
 	"github.com/Framehood/framehood-cli/internal/render"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // --- login ---
@@ -175,7 +177,8 @@ func newBalanceCmd(cfg config.Config) *cobra.Command {
 // --- generate ---
 
 func newGenerateCmd(cfg config.Config) *cobra.Command {
-	var kind, action, out, tier, format, actorID, voice string
+	var kind, action, out, tier, format, actorID, voice, shotType string
+	var multiPrompt []string
 	var media mediaInputs
 	cmd := &cobra.Command{
 		Use:   "generate [prompt]",
@@ -186,6 +189,9 @@ func newGenerateCmd(cfg config.Config) *cobra.Command {
 		Example: "  framehood generate \"a red fox in the snow\"\n" +
 			"  framehood generate --type audio --voice Rachel \"welcome to Framehood\"\n" +
 			"  framehood generate --type video \"a drone shot over a coastline\"\n" +
+			"  framehood generate --type image --action animate --image-url frame.jpg \"slow dolly in\"\n" +
+			"  framehood generate --type image --action animate --image-url frame.jpg \\\n" +
+			"      --shot \"wide establishing shot@3s\" --shot \"push in on the face@4s\" --shot-type customize\n" +
 			"  framehood generate --type video --action lipsync --video-url … --audio-url …\n" +
 			"  framehood generate --type video --action assemble --clips a.mp4,b.mp4 --audio-url vo.mp3",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -195,7 +201,7 @@ func newGenerateCmd(cfg config.Config) *cobra.Command {
 			// (which may hit the network to refresh the token) or making any tool
 			// call. A bad invocation (e.g. lipsync without --audio-url) fails fast
 			// with a clear CLI error and never touches the network.
-			tool, toolArgs, err := buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice, media)
+			tool, toolArgs, err := buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice, media, animateInputs{shots: multiPrompt, shotType: shotType})
 			if err != nil {
 				return err
 			}
@@ -232,9 +238,26 @@ func newGenerateCmd(cfg config.Config) *cobra.Command {
 	cmd.Flags().StringVarP(&out, "out", "o", "", "Output filename (defaults by type)")
 	cmd.Flags().StringVar(&action, "action", "", "Override the tool action (e.g. create, speak, scene)")
 	cmd.Flags().StringVar(&tier, "tier", "", "Quality tier (image: draft|fine|photo)")
-	cmd.Flags().StringVar(&format, "format", "", "Size preset (e.g. landscape_16_9, square)")
+	cmd.Flags().StringVar(&format, "format", "", "Aspect/size: friendly names square|portrait|9:16|landscape|16:9|3:4|4:3|shorts|reels (case-insensitive) or a raw preset like landscape_16_9; works on the actor path too")
 	cmd.Flags().StringVar(&actorID, "actor", "", "Actor id (act_…) to route through")
 	cmd.Flags().StringVar(&voice, "voice", "", "Voice name for audio speak (e.g. Rachel)")
+	// Kling multi-shot timeline for image→video (--action animate). Each --shot is
+	// one segment "prompt@duration"; the duration suffix is optional (default 5s)
+	// and a trailing 's' is allowed, e.g. "push in@4s". Repeat for more shots.
+	// Caps mirror the worker: ≤6 shots, ≤15s total, each shot 1–15s. Mutually
+	// exclusive with the positional prompt. --shot is an alias of --multi-prompt.
+	cmd.Flags().StringArrayVar(&multiPrompt, "multi-prompt", nil, "animate: one shot \"prompt@duration\" (repeatable; also as --shot; ≤6 shots, ≤15s total, each 1–15s; default 5s; conflicts with the prompt arg)")
+	cmd.Flags().StringVar(&shotType, "shot-type", "", "animate: how multi-prompt shots are stitched: customize (default) | intelligent")
+	// --shot is a friendly alias of --multi-prompt: a normalize func folds both
+	// spellings onto the single registered flag, so repeated --shot and
+	// --multi-prompt accumulate into one slice in invocation order (binding two
+	// StringArrayVars to one var instead would drop earlier values).
+	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == "shot" {
+			name = "multi-prompt"
+		}
+		return pflag.NormalizedName(name)
+	})
 	// Input-media flags for the pipeline actions (lipsync, assemble, edit, swap,
 	// captions, upscale, mix_audio, …). They carry the URLs of existing assets so
 	// a multi-step pipeline can be built — see mediaInputs / buildGenerateArgs.
@@ -282,17 +305,25 @@ func nonEmptyTrimmed(in []string) []string {
 	return out
 }
 
+// animateInputs carries the image→video (animate) timeline flags. shots are the
+// raw "prompt@duration" tokens from repeated --shot/--multi-prompt; shotType is
+// the --shot-type value. Both feed the kling multi_prompt path in buildImageArgs.
+type animateInputs struct {
+	shots    []string
+	shotType string
+}
+
 // buildGenerateArgs maps a generation type to an MCP tool name and argument map,
 // folding in any input-media URLs (media) the pipeline actions consume. The arg
 // names match the worker tool schemas (worker/src/tools/{image,audio,video}.ts).
-func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice string, media mediaInputs) (string, map[string]any, error) {
+func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice string, media mediaInputs, anim animateInputs) (string, map[string]any, error) {
 	// Drop blank/whitespace-only URLs up front so required-input validation can't
 	// be satisfied by an empty value.
 	media = media.normalized()
 	prompt = strings.TrimSpace(prompt)
 	switch strings.ToLower(kind) {
 	case "image":
-		return buildImageArgs(action, prompt, out, tier, format, actorID, media)
+		return buildImageArgs(action, prompt, out, tier, format, actorID, media, anim)
 	case "audio":
 		return buildAudioArgs(action, prompt, out, voice, actorID, media)
 	case "video":
@@ -305,12 +336,26 @@ func buildGenerateArgs(kind, action, prompt, out, tier, format, actorID, voice s
 // buildImageArgs maps the image tool's actions. create needs a prompt; edit
 // needs an image + prompt; upscale/animate need an image. The worker takes a
 // single source image as `image_url`, so the first --image-url is used.
-func buildImageArgs(action, prompt, out, tier, format, actorID string, media mediaInputs) (string, map[string]any, error) {
+//
+// animate also accepts a kling multi-shot timeline (anim.shots): when present it
+// emits `multi_prompt` (and optional `shot_type`) instead of a single prompt —
+// mirroring worker/src/tools/image.ts. --format is forwarded verbatim for every
+// action (incl. the actor path); the worker normalizes friendly names via
+// actorImageSize, so the CLI need not reject or map them.
+func buildImageArgs(action, prompt, out, tier, format, actorID string, media mediaInputs, anim animateInputs) (string, map[string]any, error) {
 	if action == "" {
 		action = "create"
 	}
 	args := map[string]any{"action": action, "out": defaultOut(out, "image.jpg")}
 	img := firstOrEmpty(media.imageURLs)
+
+	// multi_prompt / shot_type are animate-only. Reject them up front on any
+	// other action so a misplaced --shot fails clearly instead of being dropped.
+	hasShots := len(nonEmptyTrimmed(anim.shots)) > 0
+	if action != "animate" && (hasShots || strings.TrimSpace(anim.shotType) != "") {
+		return "", nil, fmt.Errorf("--shot/--multi-prompt and --shot-type only apply to image --action animate")
+	}
+
 	switch action {
 	case "create":
 		if prompt == "" {
@@ -331,9 +376,28 @@ func buildImageArgs(action, prompt, out, tier, format, actorID string, media med
 			args["image_url"] = img
 		}
 	}
-	if prompt != "" {
+
+	// Kling multi-shot timeline (animate only). Validate the caps locally and emit
+	// multi_prompt; it is mutually exclusive with the positional prompt.
+	if action == "animate" && hasShots {
+		if prompt != "" {
+			return "", nil, fmt.Errorf("set either a prompt or --shot/--multi-prompt, not both")
+		}
+		shots, err := parseMultiPrompt(anim.shots)
+		if err != nil {
+			return "", nil, err
+		}
+		args["multi_prompt"] = shots
+		if st := strings.TrimSpace(anim.shotType); st != "" {
+			if st != "customize" && st != "intelligent" {
+				return "", nil, fmt.Errorf("--shot-type must be customize or intelligent (got %q)", st)
+			}
+			args["shot_type"] = st
+		}
+	} else if prompt != "" {
 		args["prompt"] = prompt
 	}
+
 	if tier != "" {
 		args["tier"] = tier
 	}
@@ -344,6 +408,107 @@ func buildImageArgs(action, prompt, out, tier, format, actorID string, media med
 		args["actor_id"] = actorID
 	}
 	return "image", args, nil
+}
+
+// Kling multi_prompt timeline caps — mirror of worker/src/tools/image.ts.
+const (
+	multiPromptMaxShots        = 6
+	multiPromptMaxTotalSeconds = 15
+	multiPromptMinShotSeconds  = 1
+	multiPromptMaxShotSeconds  = 15
+	multiPromptDefaultSeconds  = 5
+)
+
+// parseMultiPrompt turns repeated --shot/--multi-prompt tokens of the form
+// "prompt@duration" into the worker's multi_prompt array ([]map{prompt,duration})
+// and validates Kling's caps (≤6 shots, ≤15s total, each shot 1–15s) up front so
+// a bad timeline fails with a clear CLI error before any network call. The
+// duration suffix is optional (default 5s) and may carry a trailing 's'. The
+// split is on the LAST '@' and only taken as a duration when it parses as a
+// number, so prompts containing '@' are preserved. Durations serialize as
+// strings to match the model's enum, exactly like the worker.
+func parseMultiPrompt(raw []string) ([]any, error) {
+	tokens := nonEmptyTrimmed(raw)
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("--shot/--multi-prompt needs at least one shot")
+	}
+	if len(tokens) > multiPromptMaxShots {
+		return nil, fmt.Errorf("--shot/--multi-prompt allows at most %d shots (got %d)", multiPromptMaxShots, len(tokens))
+	}
+	shots := make([]any, 0, len(tokens))
+	total := 0
+	for _, tok := range tokens {
+		promptPart, durPart := splitShot(tok)
+		promptPart = strings.TrimSpace(promptPart)
+		if promptPart == "" {
+			return nil, fmt.Errorf("each --shot needs a prompt (got %q)", tok)
+		}
+		shot := map[string]any{"prompt": promptPart}
+		secs := multiPromptDefaultSeconds
+		if durPart != "" {
+			n, err := parseShotDuration(durPart)
+			if err != nil {
+				return nil, fmt.Errorf("invalid duration in shot %q: %w", tok, err)
+			}
+			if n < multiPromptMinShotSeconds || n > multiPromptMaxShotSeconds {
+				return nil, fmt.Errorf("each shot duration must be %d–%ds (got %ds in %q)", multiPromptMinShotSeconds, multiPromptMaxShotSeconds, n, tok)
+			}
+			secs = n
+			// Serialize as a string to match the model's duration enum (the worker
+			// does the same via String(s.duration)).
+			shot["duration"] = strconv.Itoa(n)
+		}
+		total += secs
+		shots = append(shots, shot)
+	}
+	if total > multiPromptMaxTotalSeconds {
+		return nil, fmt.Errorf("multi-prompt total duration must be ≤ %ds (got %ds across %d shots)", multiPromptMaxTotalSeconds, total, len(shots))
+	}
+	return shots, nil
+}
+
+// splitShot separates a "prompt@duration" token. It splits on the LAST '@' and
+// only treats the suffix as a duration when it looks numeric (optionally with a
+// trailing 's'); otherwise the whole token is the prompt — so a prompt that
+// itself contains '@' (e.g. an email) is preserved as long as it doesn't end in
+// "@<number>". Returns (prompt, durationSuffix); durationSuffix is "" when none.
+func splitShot(tok string) (string, string) {
+	i := strings.LastIndex(tok, "@")
+	if i < 0 {
+		return tok, ""
+	}
+	suffix := strings.TrimSpace(tok[i+1:])
+	if suffix == "" || !looksLikeDuration(suffix) {
+		return tok, ""
+	}
+	return tok[:i], suffix
+}
+
+// looksLikeDuration reports whether s is a bare number with an optional trailing
+// 's' (e.g. "3", "3s", "3.0s") — the only forms splitShot treats as a duration.
+func looksLikeDuration(s string) bool {
+	s = strings.TrimSuffix(strings.ToLower(s), "s")
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseShotDuration parses a duration suffix ("3", "3s") into whole seconds. The
+// upstream Kling enum is integer seconds, so a fractional value is rejected with
+// a clear error rather than silently truncated.
+func parseShotDuration(s string) (int, error) {
+	s = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), "s")
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("duration must be a whole number of seconds (e.g. 3 or 3s), got %q", s)
+	}
+	return n, nil
 }
 
 // buildAudioArgs maps the audio tool's actions. speak takes the prompt as

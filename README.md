@@ -68,14 +68,35 @@ framehood generate --type video "a drone shot over a coastline"
 |------|---------|-------|
 | `--type, -t` | `image` | `image` · `video` · `audio` |
 | `--out, -o` | by type | output filename |
-| `--action` | by type | override the tool action (`create`, `speak`, `scene`, …) |
+| `--action` | by type | override the tool action (`create`, `speak`, `scene`, `animate`, …) |
 | `--tier` | — | image quality: `draft` · `fine` · `photo` |
-| `--format` | — | size preset, e.g. `landscape_16_9`, `square` |
+| `--format` | — | aspect/size: friendly names `square` · `portrait`/`9:16` · `landscape`/`16:9` · `3:4` · `4:3` · `shorts` · `reels` (case-insensitive), or a raw preset like `landscape_16_9`. Works on the actor path too. |
 | `--actor` | — | route through an actor (`act_…`) |
 | `--voice` | — | voice name for `audio` speak |
+| `--shot` / `--multi-prompt` | — | image `animate`: one timeline shot `"prompt@duration"` (repeatable; see below) |
+| `--shot-type` | — | image `animate`: how multi-prompt shots are stitched — `customize` (default) · `intelligent` |
 
 `generate` submits the job and polls until it finishes, then prints the output
 URL.
+
+### Multi-shot animation (`image --action animate`)
+
+Animate an image into a continuous clip built from several timed shots (Kling).
+Pass each shot as `--shot "prompt@duration"` (or the longer `--multi-prompt`);
+repeat the flag for more shots. The `@duration` suffix is optional — it defaults
+to 5s and may carry a trailing `s` (`@4` and `@4s` are equivalent):
+
+```sh
+framehood generate --type image --action animate --image-url frame.jpg \
+  --shot "wide establishing shot@3s" \
+  --shot "push in on the face@4s" \
+  --shot-type customize
+```
+
+Limits (validated locally before the call): at most **6 shots**, a combined
+runtime **≤ 15s**, each shot **1–15s**. `--shot`/`--multi-prompt` is mutually
+exclusive with the positional prompt — use one or the other. With `--actor` and
+no `--image-url`, the actor supplies the source frame.
 
 ### Other one-shot commands
 
