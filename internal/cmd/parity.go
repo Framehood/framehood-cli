@@ -258,22 +258,36 @@ func newExtraUsageCmd(cfg config.Config) *cobra.Command {
 
 // billingError extracts a structured {error, message} from a billing tool
 // payload and returns it as a clean Go error (preferring the human message),
-// or nil when the payload carries no error. The billing tool returns forbidden
-// / card_required / amount_invalid / cap_invalid / cap_reached as a NON-isError
-// JSON body {error, message} (not an MCP error), so CallTool hands them back as
-// a successful payload that we must inspect here to surface them clearly.
+// or nil when the payload is a valid body carrying no error. The billing tool
+// returns forbidden / card_required / amount_invalid / cap_invalid / cap_reached
+// as a NON-isError JSON body {error, message} (not an MCP error), so CallTool
+// hands them back as a successful payload that we must inspect here to surface
+// them clearly.
+//
+// Invalid JSON is itself an error: a malformed billing response must NOT fall
+// through as success (which would print nothing and look like the call worked).
+// A valid-but-non-object body (e.g. a bare string/number) is fine — it simply
+// carries no error field, so we return nil and let the caller render it.
 func billingError(raw json.RawMessage) error {
-	var v struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
+	// Validate the payload is well-formed JSON first; a decode failure here means
+	// a corrupt/truncated response, which we surface rather than swallow.
+	var probe any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fmt.Errorf("malformed billing response: %w", err)
 	}
-	if jsonUnmarshal(raw, &v) != nil || v.Error == "" {
+	// Only an object can carry {error, message}; a non-object body has no error.
+	obj, ok := probe.(map[string]any)
+	if !ok {
 		return nil
 	}
-	if v.Message != "" {
-		return fmt.Errorf("%s", v.Message)
+	code, _ := obj["error"].(string)
+	if code == "" {
+		return nil
 	}
-	return fmt.Errorf("%s", strings.ReplaceAll(v.Error, "_", " "))
+	if msg, _ := obj["message"].(string); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	return fmt.Errorf("%s", strings.ReplaceAll(code, "_", " "))
 }
 
 // runBillingExtraUsageRead reads the org's Extra-usage config via the MCP billing

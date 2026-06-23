@@ -42,24 +42,62 @@ func TestValidExtraUsageEUR(t *testing.T) {
 // canned per-action payload, so a test can assert exactly what the extra-usage
 // command sent.
 type billingToolServer struct {
+	t          *testing.T
+	expectAct  string // the billing action this call must carry (e.g. "extra_usage")
 	lastAction string
 	lastArgs   map[string]any
 	payload    string // JSON payload to return as the tool result text
+	gotRequest bool   // set once a well-formed expected request arrives
 }
 
+// handler returns an httptest handler that asserts the request is a well-formed
+// MCP tools/call POST to /mcp targeting the "billing" tool with the expected
+// action, then returns the canned payload. Any deviation (wrong method/path,
+// decode error, wrong tool target or action) fails the test — so broken wiring
+// can't pass green.
 func (b *billingToolServer) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			b.t.Errorf("mock: method = %q, want POST", r.Method)
+			http.Error(w, "bad method", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path != "/mcp" {
+			b.t.Errorf("mock: path = %q, want /mcp", r.URL.Path)
+			http.Error(w, "bad path", http.StatusNotFound)
+			return
+		}
 		var req struct {
+			Method string `json:"method"`
 			Params struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
 			} `json:"params"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		b.lastArgs = req.Params.Arguments
-		if a, ok := req.Params.Arguments["action"].(string); ok {
-			b.lastAction = a
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			b.t.Errorf("mock: decode request body: %v", err)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
 		}
+		if req.Method != "tools/call" {
+			b.t.Errorf("mock: rpc method = %q, want tools/call", req.Method)
+			http.Error(w, "bad method", http.StatusBadRequest)
+			return
+		}
+		if req.Params.Name != "billing" {
+			b.t.Errorf("mock: tool target = %q, want billing", req.Params.Name)
+			http.Error(w, "wrong tool", http.StatusBadRequest)
+			return
+		}
+		action, _ := req.Params.Arguments["action"].(string)
+		if b.expectAct != "" && action != b.expectAct {
+			b.t.Errorf("mock: action = %q, want %q", action, b.expectAct)
+			http.Error(w, "wrong action", http.StatusBadRequest)
+			return
+		}
+		b.gotRequest = true
+		b.lastArgs = req.Params.Arguments
+		b.lastAction = action
 		payload := b.payload
 		if payload == "" {
 			payload = `{"ok":true}`
@@ -89,12 +127,15 @@ func runExtraUsage(t *testing.T, srvURL string, args ...string) error {
 // TestExtraUsage_NoFlagsReads verifies a no-flag invocation performs the read
 // (action=extra_usage), not a write.
 func TestExtraUsage_NoFlagsReads(t *testing.T) {
-	bts := &billingToolServer{payload: `{"extra_usage":{"enabled":false,"trigger_below":200,"refill_amount_cents":null,"extra_usage_cap_cents":5000,"credits_per_eur":80,"min_amount_cents":500,"step_cents":500,"spent_this_cycle_cents":0,"has_card":false,"rate_note":"Extra usage bills at a premium rate."}}`}
+	bts := &billingToolServer{t: t, expectAct: "extra_usage", payload: `{"extra_usage":{"enabled":false,"trigger_below":200,"refill_amount_cents":null,"extra_usage_cap_cents":5000,"credits_per_eur":80,"min_amount_cents":500,"step_cents":500,"spent_this_cycle_cents":0,"has_card":false,"rate_note":"Extra usage bills at a premium rate."}}`}
 	srv := httptest.NewServer(bts.handler())
 	defer srv.Close()
 
 	if err := runExtraUsage(t, srv.URL); err != nil {
 		t.Fatalf("read should not error: %v", err)
+	}
+	if !bts.gotRequest {
+		t.Fatal("no-flag invocation must reach the billing tool")
 	}
 	if bts.lastAction != "extra_usage" {
 		t.Fatalf("no-flag invocation must read (action=extra_usage), got %q", bts.lastAction)
@@ -106,12 +147,15 @@ func TestExtraUsage_NoFlagsReads(t *testing.T) {
 // (and that --cap-eur maps to the euro-denominated extra_usage_cap_eur the MCP
 // tool accepts).
 func TestExtraUsage_EnableSendsOnlySetFields(t *testing.T) {
-	bts := &billingToolServer{payload: `{"ok":true,"extra_usage":{"enabled":true,"trigger_below":200,"refill_amount_cents":500,"extra_usage_cap_cents":5000,"credits_per_eur":80,"spent_this_cycle_cents":0,"has_card":true,"rate_note":"Premium rate."},"rate_note":"Premium rate."}`}
+	bts := &billingToolServer{t: t, expectAct: "set_extra_usage", payload: `{"ok":true,"extra_usage":{"enabled":true,"trigger_below":200,"refill_amount_cents":500,"extra_usage_cap_cents":5000,"credits_per_eur":80,"spent_this_cycle_cents":0,"has_card":true,"rate_note":"Premium rate."},"rate_note":"Premium rate."}`}
 	srv := httptest.NewServer(bts.handler())
 	defer srv.Close()
 
 	if err := runExtraUsage(t, srv.URL, "--enable", "--amount-eur", "5", "--trigger", "200", "--cap-eur", "50"); err != nil {
 		t.Fatalf("set should not error: %v", err)
+	}
+	if !bts.gotRequest {
+		t.Fatal("flagged invocation must reach the billing tool")
 	}
 	if bts.lastAction != "set_extra_usage" {
 		t.Fatalf("flagged invocation must write (action=set_extra_usage), got %q", bts.lastAction)
@@ -137,12 +181,15 @@ func TestExtraUsage_EnableSendsOnlySetFields(t *testing.T) {
 
 // TestExtraUsage_DisableSendsEnabledFalse verifies --disable sends enabled:false.
 func TestExtraUsage_DisableSendsEnabledFalse(t *testing.T) {
-	bts := &billingToolServer{payload: `{"ok":true,"extra_usage":{"enabled":false,"trigger_below":200,"extra_usage_cap_cents":5000,"credits_per_eur":80,"spent_this_cycle_cents":0,"has_card":true}}`}
+	bts := &billingToolServer{t: t, expectAct: "set_extra_usage", payload: `{"ok":true,"extra_usage":{"enabled":false,"trigger_below":200,"extra_usage_cap_cents":5000,"credits_per_eur":80,"spent_this_cycle_cents":0,"has_card":true}}`}
 	srv := httptest.NewServer(bts.handler())
 	defer srv.Close()
 
 	if err := runExtraUsage(t, srv.URL, "--disable"); err != nil {
 		t.Fatalf("disable should not error: %v", err)
+	}
+	if !bts.gotRequest {
+		t.Fatal("--disable must reach the billing tool")
 	}
 	if bts.lastAction != "set_extra_usage" {
 		t.Fatalf("--disable must write, got %q", bts.lastAction)
@@ -155,28 +202,28 @@ func TestExtraUsage_DisableSendsEnabledFalse(t *testing.T) {
 // TestExtraUsage_BadAmountFailsLocally verifies a non-€5-multiple amount is
 // rejected BEFORE any tool call (the server is never reached).
 func TestExtraUsage_BadAmountFailsLocally(t *testing.T) {
-	bts := &billingToolServer{}
+	bts := &billingToolServer{t: t}
 	srv := httptest.NewServer(bts.handler())
 	defer srv.Close()
 
 	if err := runExtraUsage(t, srv.URL, "--enable", "--amount-eur", "7"); err == nil {
 		t.Fatal("expected a local validation error for a non-€5-multiple amount")
 	}
-	if bts.lastAction != "" {
+	if bts.gotRequest {
 		t.Fatalf("a bad amount must fail before any tool call; server saw action %q", bts.lastAction)
 	}
 }
 
 // TestExtraUsage_EnableAndDisableConflict verifies the mutually-exclusive guard.
 func TestExtraUsage_EnableAndDisableConflict(t *testing.T) {
-	bts := &billingToolServer{}
+	bts := &billingToolServer{t: t}
 	srv := httptest.NewServer(bts.handler())
 	defer srv.Close()
 
 	if err := runExtraUsage(t, srv.URL, "--enable", "--disable"); err == nil {
 		t.Fatal("expected an error when both --enable and --disable are set")
 	}
-	if bts.lastAction != "" {
+	if bts.gotRequest {
 		t.Fatalf("the conflict must fail before any tool call; server saw action %q", bts.lastAction)
 	}
 }
@@ -185,7 +232,7 @@ func TestExtraUsage_EnableAndDisableConflict(t *testing.T) {
 // body the tool returns for a non-owner is surfaced as a clear CLI error
 // (carrying the human message), not silently rendered as success.
 func TestExtraUsage_ForbiddenSurfaces(t *testing.T) {
-	bts := &billingToolServer{payload: `{"error":"forbidden","message":"Only the org owner can view Extra usage."}`}
+	bts := &billingToolServer{t: t, expectAct: "extra_usage", payload: `{"error":"forbidden","message":"Only the org owner can view Extra usage."}`}
 	srv := httptest.NewServer(bts.handler())
 	defer srv.Close()
 
@@ -243,5 +290,18 @@ func TestBillingError(t *testing.T) {
 	// Error with no message falls back to the (underscores→spaces) code.
 	if err := billingError(json.RawMessage(`{"error":"amount_invalid"}`)); err == nil || err.Error() != "amount invalid" {
 		t.Errorf("bare error should map underscores to spaces; got %v", err)
+	}
+	// A valid-but-non-object body (e.g. a bare string) carries no error → nil.
+	if err := billingError(json.RawMessage(`"just a string"`)); err != nil {
+		t.Errorf("a non-object body should yield nil, got %v", err)
+	}
+	// Malformed JSON must surface as an error, NOT fall through as success — a
+	// corrupt billing response can't be treated as "no error".
+	if err := billingError(json.RawMessage(`{not json`)); err == nil {
+		t.Error("malformed JSON must yield an error, got nil")
+	}
+	// An empty payload is not valid JSON either → an error.
+	if err := billingError(json.RawMessage(``)); err == nil {
+		t.Error("empty payload must yield an error, got nil")
 	}
 }
