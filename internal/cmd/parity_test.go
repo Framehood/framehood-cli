@@ -245,7 +245,7 @@ func TestCheckLimit(t *testing.T) {
 func TestNewBillingCmd_Subcommands(t *testing.T) {
 	cfg := config.Config{}
 	cmd := newBillingCmd(cfg)
-	want := []string{"balance", "plan", "plans", "transactions", "preview", "change", "cancel"}
+	want := []string{"balance", "plan", "plans", "transactions", "preview", "change", "cancel", "extra-usage"}
 	have := subcommandNames(cmd)
 	for _, w := range want {
 		if !have[w] {

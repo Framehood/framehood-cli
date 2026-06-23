@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -76,12 +77,42 @@ func newJobsCmd(cfg config.Config) *cobra.Command {
 	return cmd
 }
 
-// --- billing (extended: transactions, change, preview, cancel) ---
+// --- billing (extended: transactions, change, preview, cancel, extra-usage) ---
+
+// Extra-usage amount bounds, mirrored from the worker
+// (worker/src/services/billing.ts: EXTRA_USAGE_MIN_CENTS / EXTRA_USAGE_STEP_CENTS).
+// The per-top-up euro amount must be at least €5 and a whole multiple of €5.
+// Validated locally in euros so a bad amount fails with a clear CLI error before
+// any network call, instead of surfacing the server's "amount_invalid".
+const (
+	extraUsageMinEUR  = 5 // €5 minimum per top-up
+	extraUsageStepEUR = 5 // €5 increment
+)
+
+// validExtraUsageEUR checks that amountEur is a €5-multiple of at least €5. It
+// mirrors the worker's isValidExtraUsageAmount (in cents) so the CLI rejects a
+// bad amount locally with a clear message. A non-multiple or below-minimum value
+// returns an error naming the rule.
+func validExtraUsageEUR(amountEur float64) error {
+	// Work in cents to avoid float-modulo surprises, the same boundary the worker
+	// converts at. Reject sub-cent precision too (e.g. €5.001).
+	cents := amountEur * 100
+	rounded := math.Round(cents)
+	if math.Abs(cents-rounded) > 1e-6 {
+		return fmt.Errorf("--amount-eur must be a whole-euro amount (got €%g)", amountEur)
+	}
+	c := int(rounded)
+	if c < extraUsageMinEUR*100 || c%(extraUsageStepEUR*100) != 0 {
+		return fmt.Errorf("--amount-eur must be at least €%d and a multiple of €%d (got €%g)", extraUsageMinEUR, extraUsageStepEUR, amountEur)
+	}
+	return nil
+}
 
 // newBillingCmd groups the billing tool actions (MCP `billing`). It keeps the
 // read views (balance/plan/plans/transactions) alongside the owner-only
-// subscription changes (change/preview/cancel). The standalone `framehood
-// balance` command stays for back-compat.
+// subscription changes (change/preview/cancel) and the Extra-usage config
+// (extra-usage). The standalone `framehood balance` command stays for
+// back-compat.
 func newBillingCmd(cfg config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "billing",
@@ -123,6 +154,8 @@ func newBillingCmd(cfg config.Config) *cobra.Command {
 	}
 	transactions.Flags().IntVarP(&limit, "limit", "n", 0, "Max ledger rows (1–50)")
 
+	extraUsage := newExtraUsageCmd(cfg)
+
 	cmd.AddCommand(
 		&cobra.Command{Use: "balance", Short: "Show your credit balance", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 			return callTool(cmd, cfg, "billing", map[string]any{"action": "balance"})
@@ -141,8 +174,260 @@ func newBillingCmd(cfg config.Config) *cobra.Command {
 			return callTool(cmd, cfg, "billing", map[string]any{"action": "change", "step": args[0]})
 		}},
 		cancel,
+		extraUsage,
 	)
 	return cmd
+}
+
+// newExtraUsageCmd builds `framehood billing extra-usage`. With no flags it reads
+// the current Extra-usage config (MCP billing action=extra_usage, owner-only).
+// With one or more flags it updates the config (action=set_extra_usage,
+// owner-only): --enable/--disable, --amount-eur, --trigger, --cap-eur. Only the
+// flags the user actually set are forwarded, so unchanged fields keep their
+// server-side values. Extra usage is premium overflow billing (the per-euro
+// credit rate is lower than a package); the read view surfaces that rate note
+// prominently.
+func newExtraUsageCmd(cfg config.Config) *cobra.Command {
+	var enable, disable bool
+	var amountEUR, capEUR float64
+	var trigger int
+	cmd := &cobra.Command{
+		Use:   "extra-usage",
+		Short: "View or configure Extra usage — premium overflow top-ups (owner only)",
+		Long: "View the org's Extra-usage config, or change it with flags.\n\n" +
+			"Extra usage automatically tops up credits at a premium overflow rate when\n" +
+			"the balance runs low, charging the card on your subscription. With no flags\n" +
+			"this reads the current config. With any flag it updates the config (owner\n" +
+			"only): enable/disable, the euro amount charged per top-up, the balance that\n" +
+			"triggers a top-up, and the per-cycle euro cap.",
+		Example: "  framehood billing extra-usage\n" +
+			"  framehood billing extra-usage --enable --amount-eur 5 --trigger 200\n" +
+			"  framehood billing extra-usage --cap-eur 50\n" +
+			"  framehood billing extra-usage --disable",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if enable && disable {
+				return fmt.Errorf("set either --enable or --disable, not both")
+			}
+			changedAny := enable || disable ||
+				cmd.Flags().Changed("amount-eur") ||
+				cmd.Flags().Changed("trigger") ||
+				cmd.Flags().Changed("cap-eur")
+			// No config flag set → read the current config.
+			if !changedAny {
+				return runBillingExtraUsageRead(cmd, cfg)
+			}
+
+			a := map[string]any{"action": "set_extra_usage"}
+			if enable {
+				a["enabled"] = true
+			} else if disable {
+				a["enabled"] = false
+			}
+			if cmd.Flags().Changed("amount-eur") {
+				// Validate the €5-multiple rule locally before the call.
+				if err := validExtraUsageEUR(amountEUR); err != nil {
+					return err
+				}
+				a["amount_eur"] = amountEUR
+			}
+			if cmd.Flags().Changed("trigger") {
+				if trigger < 0 {
+					return fmt.Errorf("--trigger must be 0 or more (got %d)", trigger)
+				}
+				a["trigger_below"] = trigger
+			}
+			if cmd.Flags().Changed("cap-eur") {
+				if capEUR < 0 {
+					return fmt.Errorf("--cap-eur must be €0 or more (got €%g)", capEUR)
+				}
+				// The MCP tool takes the cap in euros (extra_usage_cap_eur) and converts
+				// to extra_usage_cap_cents server-side.
+				a["extra_usage_cap_eur"] = capEUR
+			}
+			return runBillingSetExtraUsage(cmd, cfg, a)
+		},
+	}
+	cmd.Flags().BoolVar(&enable, "enable", false, "Turn Extra usage on")
+	cmd.Flags().BoolVar(&disable, "disable", false, "Turn Extra usage off")
+	cmd.Flags().Float64Var(&amountEUR, "amount-eur", 0, "Euros charged per top-up (≥ €5, in €5 steps)")
+	cmd.Flags().IntVar(&trigger, "trigger", 0, "Top up when the balance drops below this many credits")
+	cmd.Flags().Float64Var(&capEUR, "cap-eur", 0, "Max euros of Extra usage allowed per billing cycle")
+	return cmd
+}
+
+// billingError extracts a structured {error, message} from a billing tool
+// payload and returns it as a clean Go error (preferring the human message),
+// or nil when the payload is a valid body carrying no error. The billing tool
+// returns forbidden / card_required / amount_invalid / cap_invalid / cap_reached
+// as a NON-isError JSON body {error, message} (not an MCP error), so CallTool
+// hands them back as a successful payload that we must inspect here to surface
+// them clearly.
+//
+// Invalid JSON is itself an error: a malformed billing response must NOT fall
+// through as success (which would print nothing and look like the call worked).
+// A valid-but-non-object body (e.g. a bare string/number) is fine — it simply
+// carries no error field, so we return nil and let the caller render it.
+func billingError(raw json.RawMessage) error {
+	// Validate the payload is well-formed JSON first; a decode failure here means
+	// a corrupt/truncated response, which we surface rather than swallow.
+	var probe any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fmt.Errorf("malformed billing response: %w", err)
+	}
+	// Only an object can carry {error, message}; a non-object body has no error.
+	obj, ok := probe.(map[string]any)
+	if !ok {
+		return nil
+	}
+	code, _ := obj["error"].(string)
+	if code == "" {
+		return nil
+	}
+	if msg, _ := obj["message"].(string); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	return fmt.Errorf("%s", strings.ReplaceAll(code, "_", " "))
+}
+
+// runBillingExtraUsageRead reads the org's Extra-usage config via the MCP billing
+// tool (action=extra_usage, owner-only) and prints it as a labeled block. A
+// forbidden (non-owner) response surfaces as a clear error.
+func runBillingExtraUsageRead(cmd *cobra.Command, cfg config.Config) error {
+	sess, err := NewSession(cfg)
+	if err != nil {
+		return err
+	}
+	raw, err := sess.Client().CallTool(cmd.Context(), "billing", map[string]any{"action": "extra_usage"})
+	if err != nil {
+		return err
+	}
+	if err := billingError(raw); err != nil {
+		return err
+	}
+	if out, ok := renderExtraUsage(raw); ok {
+		fmt.Println(out)
+		return nil
+	}
+	fmt.Println(render.PrettyJSON(raw))
+	return nil
+}
+
+// runBillingSetExtraUsage applies an Extra-usage config change via the MCP
+// billing tool (action=set_extra_usage, owner-only) and prints the resulting
+// config. forbidden / card_required / amount_invalid / cap_invalid surface as
+// clear errors.
+func runBillingSetExtraUsage(cmd *cobra.Command, cfg config.Config, args map[string]any) error {
+	sess, err := NewSession(cfg)
+	if err != nil {
+		return err
+	}
+	raw, err := sess.Client().CallTool(cmd.Context(), "billing", args)
+	if err != nil {
+		return err
+	}
+	if err := billingError(raw); err != nil {
+		return err
+	}
+	fmt.Println("✓ Extra usage updated")
+	if out, ok := renderExtraUsage(raw); ok {
+		fmt.Println(out)
+		return nil
+	}
+	fmt.Println(render.PrettyJSON(raw))
+	return nil
+}
+
+// renderExtraUsage formats an Extra-usage config payload as a labeled block. It
+// accepts both the read shape ({extra_usage:{…}}) and the write shape ({ok,
+// extra_usage:{…}, rate_note}), so the same renderer serves extra_usage and
+// set_extra_usage. Euro amounts are shown alongside their ≈credit value at the
+// payload's credits_per_eur; the per-cycle cap shows spent-of-cap; and the
+// premium-rate note is surfaced prominently.
+func renderExtraUsage(raw json.RawMessage) (string, bool) {
+	type cfg struct {
+		Enabled         *bool    `json:"enabled"`
+		TriggerBelow    *int     `json:"trigger_below"`
+		RefillAmtCents  *int     `json:"refill_amount_cents"`
+		CapCents        *int     `json:"extra_usage_cap_cents"`
+		CreditsPerEUR   *float64 `json:"credits_per_eur"`
+		SpentCycleCents *int     `json:"spent_this_cycle_cents"`
+		HasCard         *bool    `json:"has_card"`
+		RateNote        string   `json:"rate_note"`
+	}
+	// The payload wraps the config under "extra_usage". rate_note may sit on the
+	// wrapper (write shape) or inside the config (read shape) — capture both.
+	var v struct {
+		ExtraUsage *cfg   `json:"extra_usage"`
+		RateNote   string `json:"rate_note"`
+	}
+	if jsonUnmarshal(raw, &v) != nil || v.ExtraUsage == nil {
+		return "", false
+	}
+	c := *v.ExtraUsage
+	// A config payload always carries at least the enabled flag.
+	if c.Enabled == nil {
+		return "", false
+	}
+	var b strings.Builder
+	state := "off"
+	if *c.Enabled {
+		state = "on"
+	}
+	fmt.Fprintf(&b, "Extra usage: %s\n", state)
+	if c.RefillAmtCents != nil && *c.RefillAmtCents > 0 {
+		line := fmt.Sprintf("Amount per top-up: €%s", trimEUR(float64(*c.RefillAmtCents)/100))
+		if cr := extraUsageCredits(c.RefillAmtCents, c.CreditsPerEUR); cr != "" {
+			line += " (≈" + cr + ")"
+		}
+		fmt.Fprintln(&b, line)
+	}
+	if c.TriggerBelow != nil {
+		fmt.Fprintf(&b, "Trigger below: %d credits\n", *c.TriggerBelow)
+	}
+	if c.CapCents != nil {
+		cap := fmt.Sprintf("Per-cycle cap: €%s", trimEUR(float64(*c.CapCents)/100))
+		if c.SpentCycleCents != nil {
+			cap += fmt.Sprintf(" (€%s used this cycle)", trimEUR(float64(*c.SpentCycleCents)/100))
+		}
+		fmt.Fprintln(&b, cap)
+	} else if c.SpentCycleCents != nil {
+		fmt.Fprintf(&b, "Spent this cycle: €%s\n", trimEUR(float64(*c.SpentCycleCents)/100))
+	}
+	if c.HasCard != nil {
+		card := "no card on file — add one with `framehood billing manage`"
+		if *c.HasCard {
+			card = "card on file"
+		}
+		fmt.Fprintf(&b, "Payment method: %s\n", card)
+	}
+	// Surface the premium-rate note prominently (last, on its own line). Prefer
+	// the wrapper's rate_note, then the config's.
+	note := firstNonEmpty(v.RateNote, c.RateNote)
+	if note != "" {
+		fmt.Fprintf(&b, "\nNote: %s", note)
+	}
+	return strings.TrimRight(b.String(), "\n"), true
+}
+
+// extraUsageCredits renders the ≈credit value of an amount-in-cents at a given
+// credits-per-euro rate, e.g. (500c, 80/€) → "400 credits". Returns "" when
+// either input is missing so the caller can omit the parenthetical.
+func extraUsageCredits(amountCents *int, creditsPerEUR *float64) string {
+	if amountCents == nil || creditsPerEUR == nil || *creditsPerEUR <= 0 {
+		return ""
+	}
+	credits := float64(*amountCents) / 100 * *creditsPerEUR
+	return fmt.Sprintf("%s credits", trimEUR(credits))
+}
+
+// trimEUR renders a euro (or credit) amount without a trailing ".00" for whole
+// values (e.g. 20.00 → "20", 4.50 → "4.50").
+func trimEUR(v float64) string {
+	if v == math.Trunc(v) {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return fmt.Sprintf("%.2f", v)
 }
 
 // --- files (extended: list/upload/delete/publish/unpublish/download) ---

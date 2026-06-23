@@ -108,6 +108,7 @@ output (no raw JSON dumps):
 | `framehood whoami` · `framehood balance` | your account / credit balance |
 | `framehood billing <balance\|plan\|plans\|transactions>` | credits, plan, and the credit ledger |
 | `framehood billing <preview\|change> <package>` · `billing cancel [--reactivate]` | owner-only subscription changes |
+| `framehood billing extra-usage [flags]` | owner-only: view or configure premium overflow top-ups (see below) |
 | `framehood jobs [list]` · `framehood jobs cancel <id>` | generation history; cancel a running job |
 | `framehood files <list\|upload\|delete\|publish\|unpublish\|download>` | manage your storage (`download -o <path>` writes to disk) |
 | `framehood project <list\|create\|update\|delete\|assign\|use\|current>` | group generations into projects |
@@ -117,6 +118,29 @@ output (no raw JSON dumps):
 | `framehood library …` | search past generations and manage the trash |
 
 Run `framehood <command> --help` for the flags on each.
+
+### Extra usage (`billing extra-usage`)
+
+Extra usage automatically tops up credits at a premium overflow rate when your
+balance runs low, charging the card on your subscription. It is owner-only.
+
+```sh
+framehood billing extra-usage                                  # view the current config
+framehood billing extra-usage --enable --amount-eur 5 --trigger 200
+framehood billing extra-usage --cap-eur 50
+framehood billing extra-usage --disable
+```
+
+With no flags it prints the current config (enabled, amount per top-up and its
+≈credit value, trigger balance, per-cycle cap and spend, card-on-file, and the
+premium-rate note). With any flag it updates only the fields you set:
+
+| Flag | Notes |
+|------|-------|
+| `--enable` / `--disable` | turn Extra usage on or off |
+| `--amount-eur <n>` | euros charged per top-up — at least **€5**, in **€5** steps (validated locally) |
+| `--trigger <credits>` | top up when the balance drops below this many credits |
+| `--cap-eur <n>` | max euros of Extra usage allowed per billing cycle |
 
 ## Studio (interactive)
 
