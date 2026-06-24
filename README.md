@@ -109,6 +109,7 @@ output (no raw JSON dumps):
 | `framehood billing <balance\|plan\|plans\|transactions>` | credits, plan, and the credit ledger |
 | `framehood billing <preview\|change> <package>` · `billing cancel [--reactivate]` | owner-only subscription changes |
 | `framehood billing extra-usage [flags]` | owner-only: view or configure premium overflow top-ups (see below) |
+| `framehood billing topup --eur N` | buy €N of extra credits now via a hosted Stripe invoice (see below) |
 | `framehood jobs [list]` · `framehood jobs cancel <id>` | generation history; cancel a running job |
 | `framehood files <list\|upload\|delete\|publish\|unpublish\|download>` | manage your storage (`download -o <path>` writes to disk) |
 | `framehood project <list\|create\|update\|delete\|assign\|use\|current>` | group generations into projects |
@@ -141,6 +142,21 @@ premium-rate note). With any flag it updates only the fields you set:
 | `--amount-eur <n>` | euros charged per top-up — at least **€5**, in **€5** steps (validated locally) |
 | `--trigger <credits>` | top up when the balance drops below this many credits |
 | `--cap-eur <n>` | max euros of Extra usage allowed per billing cycle |
+
+### One-off top-up (`billing topup`)
+
+Buy a batch of extra credits now, without changing your plan. It raises a hosted
+Stripe invoice at the extra-usage rate and prints a URL to open and pay.
+
+```sh
+framehood billing topup --eur 20    # the minimum
+framehood billing topup --eur 100
+```
+
+`--eur` is required and must be a whole-euro amount between **€20** and
+**€5,000** (validated locally). An owner with a card on file is charged
+automatically — the hosted page is then the receipt; otherwise you pay on the
+hosted page. Credits land once the invoice is paid.
 
 ## Studio (interactive)
 

@@ -2,13 +2,17 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Framehood/framehood-cli/internal/config"
 	"github.com/Framehood/framehood-cli/internal/render"
@@ -150,3 +154,17 @@ func checkLimit(n, min, max int) error {
 // jsonUnmarshal is a tiny alias kept local so command files don't each import
 // encoding/json just for one decode.
 func jsonUnmarshal(raw json.RawMessage, v any) error { return json.Unmarshal(raw, v) }
+
+// newIdempotencyKey returns a per-invocation Idempotency-Key for a money write
+// (the billing top-up). A CLI run is one logical request, so one key per run is
+// enough: a transient timeout+retry within the same invocation reuses it and the
+// worker collapses the calls to a single Stripe invoice instead of double-billing.
+// It prefers crypto/rand; if that ever fails it falls back to a timestamp so the
+// command can still proceed (a distinct, if non-collapsing, key).
+func newIdempotencyKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "cli-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	return "cli-" + hex.EncodeToString(b)
+}
