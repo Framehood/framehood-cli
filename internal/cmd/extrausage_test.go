@@ -278,6 +278,152 @@ func TestRenderExtraUsage(t *testing.T) {
 	}
 }
 
+// --- topup ---
+
+// runTopup builds the billing command, runs `topup` with args, and returns the
+// resulting error. It points the session at the mock server, mirroring
+// runExtraUsage.
+func runTopup(t *testing.T, srvURL string, args ...string) error {
+	t.Helper()
+	cfg := testSessionConfig(t, srvURL)
+	cmd := newBillingCmd(cfg)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs(append([]string{"topup"}, args...))
+	return cmd.Execute()
+}
+
+// TestValidTopupEUR enforces the whole-euro [€20, €5,000] range (mirrors the
+// worker's isValidTopupAmount), including sub-euro rejection.
+func TestValidTopupEUR(t *testing.T) {
+	cases := []struct {
+		eur     float64
+		wantErr bool
+	}{
+		{20, false},     // exactly the minimum
+		{21, false},     // not bound to the €5 grid — any whole euro is fine
+		{100, false},    // a typical amount
+		{5000, false},   // exactly the maximum
+		{19, true},      // below minimum
+		{19.99, true},   // below minimum (and sub-euro)
+		{0, true},       // below minimum
+		{-20, true},     // negative
+		{20.5, true},    // sub-euro precision
+		{5000.01, true}, // above maximum (and sub-euro)
+		{5001, true},    // above maximum
+	}
+	for _, c := range cases {
+		err := validTopupEUR(c.eur)
+		if (err != nil) != c.wantErr {
+			t.Errorf("validTopupEUR(%g) err=%v, wantErr=%v", c.eur, err, c.wantErr)
+		}
+	}
+}
+
+// TestTopup_ValidPrintsURLAndCredits verifies a valid `--eur` drives a topup
+// (action=topup) carrying amount_cents + an idempotency_key, and that the
+// command succeeds against the canned {url,credits} payload.
+func TestTopup_ValidPrintsURLAndCredits(t *testing.T) {
+	bts := &billingToolServer{t: t, expectAct: "topup", payload: `{"url":"https://invoice.stripe.com/i/abc","invoice_id":"in_123","credits":8000}`}
+	srv := httptest.NewServer(bts.handler())
+	defer srv.Close()
+
+	if err := runTopup(t, srv.URL, "--eur", "100"); err != nil {
+		t.Fatalf("valid topup should not error: %v", err)
+	}
+	if !bts.gotRequest {
+		t.Fatal("a valid topup must reach the billing tool")
+	}
+	if bts.lastAction != "topup" {
+		t.Fatalf("topup must send action=topup, got %q", bts.lastAction)
+	}
+	// €100 → 10,000 cents. JSON numbers decode as float64.
+	if got, _ := bts.lastArgs["amount_cents"].(float64); got != 10000 {
+		t.Errorf("amount_cents = %v, want 10000", bts.lastArgs["amount_cents"])
+	}
+	// A money write must carry an idempotency key so a retry can't double-bill.
+	if key, _ := bts.lastArgs["idempotency_key"].(string); key == "" {
+		t.Error("topup must send a non-empty idempotency_key")
+	}
+}
+
+// TestTopup_BelowMinimumFailsLocally verifies a sub-€20 amount is rejected
+// BEFORE any tool call (the server is never reached), as both a client-side
+// guard and to avoid a wasted round-trip to the server's 400.
+func TestTopup_BelowMinimumFailsLocally(t *testing.T) {
+	bts := &billingToolServer{t: t}
+	srv := httptest.NewServer(bts.handler())
+	defer srv.Close()
+
+	if err := runTopup(t, srv.URL, "--eur", "10"); err == nil {
+		t.Fatal("expected a local validation error for a sub-€20 amount")
+	}
+	if bts.gotRequest {
+		t.Fatalf("a below-minimum amount must fail before any tool call; server saw action %q", bts.lastAction)
+	}
+}
+
+// TestTopup_RequiresEUR verifies omitting --eur fails locally with a clear error,
+// before any tool call.
+func TestTopup_RequiresEUR(t *testing.T) {
+	bts := &billingToolServer{t: t}
+	srv := httptest.NewServer(bts.handler())
+	defer srv.Close()
+
+	if err := runTopup(t, srv.URL); err == nil {
+		t.Fatal("expected an error when --eur is omitted")
+	}
+	if bts.gotRequest {
+		t.Fatalf("a missing --eur must fail before any tool call; server saw action %q", bts.lastAction)
+	}
+}
+
+// TestTopup_AmountInvalidSurfaces verifies the NON-isError {error,message} body
+// the tool returns for a bad amount is surfaced as a clear CLI error, not
+// silently rendered as success.
+func TestTopup_AmountInvalidSurfaces(t *testing.T) {
+	bts := &billingToolServer{t: t, expectAct: "topup", payload: `{"error":"amount_invalid","message":"Top-up must be between €20 and €5,000."}`}
+	srv := httptest.NewServer(bts.handler())
+	defer srv.Close()
+
+	err := runTopup(t, srv.URL, "--eur", "20")
+	if err == nil {
+		t.Fatal("expected an amount_invalid error to surface")
+	}
+	if err.Error() != "Top-up must be between €20 and €5,000." {
+		t.Fatalf("amount_invalid message not surfaced; got %q", err.Error())
+	}
+}
+
+// TestRenderTopup formats the url + credits, handles the needs_action note, and
+// rejects a payload with no usable URL (so the caller falls back to raw JSON
+// rather than reporting success with no way to pay).
+func TestRenderTopup(t *testing.T) {
+	out, ok := renderTopup(json.RawMessage(`{"url":"https://invoice.stripe.com/i/abc","invoice_id":"in_1","credits":1600}`))
+	if !ok {
+		t.Fatal("renderTopup returned ok=false for a valid payload")
+	}
+	for _, want := range []string{"1600 credits", "https://invoice.stripe.com/i/abc", "Open to pay"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("topup render missing %q\n%s", want, out)
+		}
+	}
+
+	// needs_action (off-session SCA) surfaces a confirmation note.
+	act, ok := renderTopup(json.RawMessage(`{"url":"https://invoice.stripe.com/i/xyz","credits":1600,"needs_action":true}`))
+	if !ok {
+		t.Fatal("renderTopup returned ok=false for a needs_action payload")
+	}
+	if !strings.Contains(act, "needs confirmation") {
+		t.Errorf("needs_action render missing the confirmation note\n%s", act)
+	}
+
+	// No URL → ok=false so the caller can fall back to raw JSON.
+	if _, ok := renderTopup(json.RawMessage(`{"credits":1600}`)); ok {
+		t.Error("renderTopup should reject a payload with no url")
+	}
+}
+
 // TestBillingError extracts {error,message}, preferring the message, and returns
 // nil when there is no error.
 func TestBillingError(t *testing.T) {

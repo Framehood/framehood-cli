@@ -89,6 +89,36 @@ const (
 	extraUsageStepEUR = 5 // €5 increment
 )
 
+// Manual top-up bounds, mirrored from the worker
+// (worker/src/handlers/stripe.ts: TOPUP_MIN_CENTS / TOPUP_MAX_CENTS). A one-off
+// top-up is a deliberate purchase, not the €5 auto-refill grid: any whole-euro
+// amount in [€20, €5,000] is allowed (credits are derived at the extra-usage
+// rate). Validated locally in euros so a bad amount fails with a clear CLI error
+// before any network call, instead of surfacing the server's "amount_invalid".
+const (
+	topupMinEUR = 20   // €20 minimum per top-up
+	topupMaxEUR = 5000 // €5,000 maximum per top-up
+)
+
+// validTopupEUR checks that amountEur is a whole-euro amount within [€20, €5,000].
+// It mirrors the worker's isValidTopupAmount (in cents) so the CLI rejects a bad
+// amount locally with a clear message. A fractional or out-of-range value returns
+// an error naming the rule.
+func validTopupEUR(amountEur float64) error {
+	// Work in cents to avoid float-modulo surprises, the same boundary the worker
+	// converts at. Reject sub-euro precision (Stripe top-ups are whole euros here).
+	cents := amountEur * 100
+	rounded := math.Round(cents)
+	if math.Abs(cents-rounded) > 1e-6 || int(rounded)%100 != 0 {
+		return fmt.Errorf("--eur must be a whole-euro amount (got €%g)", amountEur)
+	}
+	eur := int(rounded) / 100
+	if eur < topupMinEUR || eur > topupMaxEUR {
+		return fmt.Errorf("--eur must be between €%d and €%d (got €%g)", topupMinEUR, topupMaxEUR, amountEur)
+	}
+	return nil
+}
+
 // validExtraUsageEUR checks that amountEur is a €5-multiple of at least €5. It
 // mirrors the worker's isValidExtraUsageAmount (in cents) so the CLI rejects a
 // bad amount locally with a clear message. A non-multiple or below-minimum value
@@ -155,6 +185,7 @@ func newBillingCmd(cfg config.Config) *cobra.Command {
 	transactions.Flags().IntVarP(&limit, "limit", "n", 0, "Max ledger rows (1–50)")
 
 	extraUsage := newExtraUsageCmd(cfg)
+	topup := newTopupCmd(cfg)
 
 	cmd.AddCommand(
 		&cobra.Command{Use: "balance", Short: "Show your credit balance", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -175,8 +206,113 @@ func newBillingCmd(cfg config.Config) *cobra.Command {
 		}},
 		cancel,
 		extraUsage,
+		topup,
 	)
 	return cmd
+}
+
+// newTopupCmd builds `framehood billing topup --eur N`. It buys €N of extra
+// credits now as a hosted Stripe invoice (MCP billing action=topup), at the
+// extra-usage rate (80 credits/€). The amount is validated locally against the
+// [€20, €5,000] whole-euro range before any call, then sent as amount_cents. A
+// per-invocation Idempotency-Key is forwarded so a client retry collapses to the
+// same invoice instead of double-billing. On success it prints the credits to be
+// granted and the hosted invoice URL to open and pay.
+func newTopupCmd(cfg config.Config) *cobra.Command {
+	var eur float64
+	cmd := &cobra.Command{
+		Use:   "topup --eur N",
+		Short: "Buy €N of extra credits now via a hosted Stripe invoice (€20–€5,000)",
+		Long: "Buy a one-off batch of extra credits now.\n\n" +
+			"This raises a hosted Stripe invoice for €N (at least €20, up to €5,000) at\n" +
+			"the extra-usage rate, and prints a URL to open and pay. An owner with a card\n" +
+			"on file is charged automatically (the hosted page is the receipt); otherwise\n" +
+			"you pay on the hosted page. Credits land once the invoice is paid.",
+		Example: "  framehood billing topup --eur 20\n" +
+			"  framehood billing topup --eur 100",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --eur is required and must be a whole-euro amount in range. Validate
+			// locally so a bad amount fails clearly before any network call.
+			if !cmd.Flags().Changed("eur") {
+				return fmt.Errorf("--eur is required (the euros to top up, between €%d and €%d)", topupMinEUR, topupMaxEUR)
+			}
+			if err := validTopupEUR(eur); err != nil {
+				return err
+			}
+			amountCents := int(math.Round(eur * 100))
+			a := map[string]any{
+				"action":       "topup",
+				"amount_cents": amountCents,
+				// A per-invocation Idempotency-Key: a CLI run is one logical request, so
+				// one key per invocation is enough — a client timeout+retry within the
+				// same run reuses it and collapses to one invoice (the worker also reads
+				// the Idempotency-Key header; this body field is its documented fallback).
+				"idempotency_key": newIdempotencyKey(),
+			}
+			return runBillingTopup(cmd, cfg, a)
+		},
+	}
+	cmd.Flags().Float64Var(&eur, "eur", 0, fmt.Sprintf("Euros to top up — a whole-euro amount between €%d and €%d", topupMinEUR, topupMaxEUR))
+	return cmd
+}
+
+// runBillingTopup raises a top-up invoice via the MCP billing tool
+// (action=topup) and prints the credits + hosted invoice URL. amount_invalid /
+// stripe_not_configured / topup_failed surface as clear errors (the billing tool
+// returns them as a NON-isError {error,message} body). A malformed/empty payload
+// is surfaced rather than swallowed.
+func runBillingTopup(cmd *cobra.Command, cfg config.Config, args map[string]any) error {
+	sess, err := NewSession(cfg)
+	if err != nil {
+		return err
+	}
+	raw, err := sess.Client().CallTool(cmd.Context(), "billing", args)
+	if err != nil {
+		return err
+	}
+	if err := billingError(raw); err != nil {
+		return err
+	}
+	if out, ok := renderTopup(raw); ok {
+		fmt.Println(out)
+		return nil
+	}
+	// No recognizable {url,credits} shape — never claim success silently; show
+	// what the tool returned so the user isn't left without the payable URL.
+	fmt.Println(render.PrettyJSON(raw))
+	return nil
+}
+
+// renderTopup formats a top-up payload ({url, invoice_id, credits, needs_action?})
+// as a short, readable block: the credits to be granted and the hosted invoice
+// URL to open and pay. It returns ok=false when the payload carries no usable
+// URL, so the caller can fall back to raw JSON rather than printing a result with
+// no way to pay. needs_action (an off-session SCA on a saved card) adds a note
+// that payment must be completed on the hosted page.
+func renderTopup(raw json.RawMessage) (string, bool) {
+	var v struct {
+		URL         string `json:"url"`
+		InvoiceID   string `json:"invoice_id"`
+		Credits     *int   `json:"credits"`
+		NeedsAction bool   `json:"needs_action"`
+	}
+	if jsonUnmarshal(raw, &v) != nil || v.URL == "" {
+		return "", false
+	}
+	var b strings.Builder
+	if v.Credits != nil {
+		fmt.Fprintf(&b, "✓ Top-up invoice created: %d credits.\n", *v.Credits)
+	} else {
+		fmt.Fprintln(&b, "✓ Top-up invoice created.")
+	}
+	if v.NeedsAction {
+		fmt.Fprintln(&b, "Payment needs confirmation — complete it on the hosted page:")
+	} else {
+		fmt.Fprintln(&b, "Open to pay (or view the receipt):")
+	}
+	fmt.Fprintf(&b, "  %s", v.URL)
+	return b.String(), true
 }
 
 // newExtraUsageCmd builds `framehood billing extra-usage`. With no flags it reads
