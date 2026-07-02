@@ -92,6 +92,30 @@ func TestReadable_KnownShapes(t *testing.T) {
 			wantContains: []string{"job id", "kind", "status", "when", "j1", "flux_schnell", "succeeded", "2026-06-20", "--cursor c2"},
 		},
 		{
+			// The batched multi-id poll ({job_ids:[…]}): a summary line with the
+			// non-zero buckets, then a row per job with its main output URL.
+			name: "get_status.batch", tool: "get_status", action: "batch",
+			raw: `{"summary":{"total":3,"queued":0,"running":1,"succeeded":1,"failed":1,"not_found":0},` +
+				`"jobs":[{"job_id":"job_a","status":"succeeded","done":true,"outputs":{"video_url":"https://cdn.framehood.ai/a.mp4"},"credits":40},` +
+				`{"job_id":"job_b","status":"running","done":false},` +
+				`{"job_id":"job_c","status":"failed","done":true,"error":"boom"}]}`,
+			wantContains: []string{
+				"3 jobs", "1 running", "1 succeeded", "1 failed",
+				"job id", "status", "output",
+				"job_a", "succeeded", "https://cdn.framehood.ai/a.mp4",
+				"job_b", "running",
+				"job_c", "failed",
+			},
+		},
+		{
+			// Zero-count buckets stay off the summary line; a job with no outputs
+			// yet renders a dash in the output column.
+			name: "get_status.batch all queued", tool: "get_status", action: "batch",
+			raw: `{"summary":{"total":2,"queued":2,"running":0,"succeeded":0,"failed":0,"not_found":0},` +
+				`"jobs":[{"job_id":"job_a","status":"queued","done":false},{"job_id":"job_b","status":"queued","done":false}]}`,
+			wantContains: []string{"2 jobs: 2 queued", "job_a", "job_b", "—"},
+		},
+		{
 			name: "api_keys.list", tool: "api_keys", action: "list",
 			raw:          `{"api_keys":[{"api_key":"abcd1234…","name":"ci","created_at":"2026-06-20T09:00:00Z","last_used_at":null,"is_active":true},{"api_key":"efgh5678…","name":"old","created_at":"2026-06-10T09:00:00Z","last_used_at":"2026-06-12T09:00:00Z","is_active":false}]}`,
 			wantContains: []string{"key", "name", "status", "created", "last used", "abcd1234…", "ci", "active", "efgh5678…", "revoked", "2026-06-12"},
@@ -179,6 +203,11 @@ func TestReadable_UnknownFallsBack(t *testing.T) {
 	// Bare string payload for a known action.
 	if _, ok := Readable("billing", "balance", json.RawMessage(`"hi"`)); ok {
 		t.Error("a bare string should not satisfy billing.balance")
+	}
+	// A single-job record (no summary/jobs) must not satisfy the batch formatter
+	// — the caller falls back to the full pretty-printed job.
+	if _, ok := Readable("get_status", "batch", json.RawMessage(`{"job_id":"j1","status":"running"}`)); ok {
+		t.Error("a single-job shape should not satisfy get_status.batch")
 	}
 	// Empty raw.
 	if _, ok := Readable("org", "info", json.RawMessage(``)); ok {

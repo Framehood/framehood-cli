@@ -71,6 +71,7 @@ var formatters = map[string]formatter{
 	"project.list":         fmtProjectList,
 	"project.current":      fmtProjectCurrent,
 	"get_status.list":      fmtJobsList,
+	"get_status.batch":     fmtJobsBatch,
 	"api_keys.list":        fmtAPIKeysList,
 	"models.list":          fmtModelsList,
 	"workflows.":           fmtWorkflowsList,
@@ -438,6 +439,71 @@ func fmtJobsList(raw json.RawMessage) (string, bool) {
 		out += "\n…more — list again with --cursor " + v.NextCursor
 	}
 	return out, true
+}
+
+// get_status batch (job_ids:[…]) → {summary:{total, queued, running, succeeded,
+// failed, not_found}, jobs:[{job_id, status, done, outputs?, credits?, error?}]}.
+// One summary line (total + every non-zero bucket) then a row per job with its
+// main output URL. The "batch" action key is synthetic — the tool call carries
+// no action; the CLI's multi-id `jobs status` selects this formatter.
+func fmtJobsBatch(raw json.RawMessage) (string, bool) {
+	var v struct {
+		Summary *struct {
+			Total     int `json:"total"`
+			Queued    int `json:"queued"`
+			Running   int `json:"running"`
+			Succeeded int `json:"succeeded"`
+			Failed    int `json:"failed"`
+			NotFound  int `json:"not_found"`
+		} `json:"summary"`
+		Jobs []struct {
+			JobID   string         `json:"job_id"`
+			Status  string         `json:"status"`
+			Outputs map[string]any `json:"outputs"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || v.Summary == nil || v.Jobs == nil {
+		return "", false
+	}
+	s := *v.Summary
+	buckets := make([]string, 0, 5)
+	for _, p := range []struct {
+		n     int
+		label string
+	}{
+		{s.Queued, "queued"},
+		{s.Running, "running"},
+		{s.Succeeded, "succeeded"},
+		{s.Failed, "failed"},
+		{s.NotFound, "not found"},
+	} {
+		if p.n > 0 {
+			buckets = append(buckets, fmt.Sprintf("%d %s", p.n, p.label))
+		}
+	}
+	head := plural(s.Total, "job")
+	if len(buckets) > 0 {
+		head += ": " + strings.Join(buckets, " · ")
+	}
+	if len(v.Jobs) == 0 {
+		return head, true
+	}
+	rows := make([][]string, 0, len(v.Jobs))
+	for _, j := range v.Jobs {
+		rows = append(rows, []string{orDash(j.JobID), orDash(j.Status), orDash(outputURL(j.Outputs))})
+	}
+	return head + "\n" + table([]string{"job id", "status", "output"}, rows), true
+}
+
+// outputURL returns a job's primary output URL, trying the known output keys
+// (mirrors mcp.Job.ResultURL; duplicated so render stays dependency-free).
+func outputURL(outputs map[string]any) string {
+	for _, k := range []string{"video_url", "image_url", "audio_url", "url", "result_url", "out"} {
+		if v, ok := outputs[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // --- api_keys ---

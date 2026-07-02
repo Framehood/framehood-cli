@@ -254,13 +254,127 @@ func TestNewBillingCmd_Subcommands(t *testing.T) {
 	}
 }
 
-// TestNewJobsCmd_Subcommands verifies jobs exposes list + cancel.
+// TestNewJobsCmd_Subcommands verifies jobs exposes list + status + cancel.
 func TestNewJobsCmd_Subcommands(t *testing.T) {
 	have := subcommandNames(newJobsCmd(config.Config{}))
-	for _, w := range []string{"list", "cancel"} {
+	for _, w := range []string{"list", "status", "cancel"} {
 		if !have[w] {
 			t.Errorf("jobs missing subcommand %q", w)
 		}
+	}
+}
+
+// statusToolServer mocks the worker's /mcp endpoint for get_status. It records
+// the raw arguments of each tools/call so a test can assert exactly which shape
+// (job_id vs job_ids) the CLI sent, and answers with a canned payload.
+type statusToolServer struct {
+	args    []map[string]any
+	payload string // JSON payload returned for every call
+}
+
+func (s *statusToolServer) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		s.args = append(s.args, req.Params.Arguments)
+		inner, _ := json.Marshal(s.payload)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%s}]}}`, inner)
+	}
+}
+
+// runJobsStatus executes `jobs status <ids…>` against cfg and returns the error.
+func runJobsStatus(cfg config.Config, ids ...string) error {
+	cmd := newJobsCmd(cfg)
+	cmd.SetArgs(append([]string{"status"}, ids...))
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	return cmd.Execute()
+}
+
+// TestJobsStatus_SingleID keeps today's per-job poll shape: exactly one call
+// carrying {job_id:…} and no job_ids/action.
+func TestJobsStatus_SingleID(t *testing.T) {
+	sts := &statusToolServer{payload: `{"job_id":"job_a","status":"succeeded","done":true,"outputs":{"image_url":"https://cdn.framehood.ai/a.png"}}`}
+	srv := httptest.NewServer(sts.handler())
+	defer srv.Close()
+
+	if err := runJobsStatus(testSessionConfig(t, srv.URL), "job_a"); err != nil {
+		t.Fatalf("single-id status: %v", err)
+	}
+	if len(sts.args) != 1 {
+		t.Fatalf("want 1 tools/call, got %d", len(sts.args))
+	}
+	a := sts.args[0]
+	if a["job_id"] != "job_a" {
+		t.Errorf("job_id = %v, want job_a", a["job_id"])
+	}
+	for _, k := range []string{"job_ids", "action"} {
+		if _, present := a[k]; present {
+			t.Errorf("single-id call must not carry %q (args %v)", k, a)
+		}
+	}
+}
+
+// TestJobsStatus_MultiID batches all ids into ONE get_status call carrying
+// {job_ids:[…]} — never one call per id — and no job_id/action.
+func TestJobsStatus_MultiID(t *testing.T) {
+	sts := &statusToolServer{payload: `{"summary":{"total":3,"queued":0,"running":1,"succeeded":1,"failed":1,"not_found":0},` +
+		`"jobs":[{"job_id":"job_a","status":"succeeded","done":true,"outputs":{"video_url":"https://cdn.framehood.ai/a.mp4"}},` +
+		`{"job_id":"job_b","status":"running","done":false},` +
+		`{"job_id":"job_c","status":"failed","done":true,"error":"boom"}]}`}
+	srv := httptest.NewServer(sts.handler())
+	defer srv.Close()
+
+	if err := runJobsStatus(testSessionConfig(t, srv.URL), "job_a", "job_b", "job_c"); err != nil {
+		t.Fatalf("multi-id status: %v", err)
+	}
+	if len(sts.args) != 1 {
+		t.Fatalf("a batch must be ONE tools/call, got %d", len(sts.args))
+	}
+	a := sts.args[0]
+	ids, ok := a["job_ids"].([]any)
+	if !ok || len(ids) != 3 {
+		t.Fatalf("job_ids = %v, want 3 ids", a["job_ids"])
+	}
+	for i, want := range []string{"job_a", "job_b", "job_c"} {
+		if ids[i] != want {
+			t.Errorf("job_ids[%d] = %v, want %q", i, ids[i], want)
+		}
+	}
+	for _, k := range []string{"job_id", "action"} {
+		if _, present := a[k]; present {
+			t.Errorf("batch call must not carry %q (args %v)", k, a)
+		}
+	}
+}
+
+// TestJobsStatus_TooManyIDs rejects an oversized batch locally (the worker cap
+// is 50 ids) with a clear error, before any session/network work — the config
+// carries no credentials, so reaching NewSession would fail differently.
+func TestJobsStatus_TooManyIDs(t *testing.T) {
+	ids := make([]string, maxBatchStatusIDs+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("job_%d", i)
+	}
+	err := runJobsStatus(config.Config{}, ids...)
+	if err == nil {
+		t.Fatal("expected an error for >50 ids")
+	}
+	if !strings.Contains(err.Error(), "50") {
+		t.Errorf("error should name the 50-id cap, got: %v", err)
+	}
+}
+
+// TestJobsStatus_NoIDs requires at least one id (arg validation, no network).
+func TestJobsStatus_NoIDs(t *testing.T) {
+	if err := runJobsStatus(config.Config{}); err == nil {
+		t.Fatal("expected an arg error when no job id is given")
 	}
 }
 
