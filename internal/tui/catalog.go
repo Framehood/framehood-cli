@@ -88,6 +88,7 @@ var catalog = []toolGroup{
 		{"qa", "scene", "scene vs plan", kindGenerate, "", "", []string{"video", "plan"}, false},
 		{"qa", "transcript", "transcribe a video", kindGenerate, "", "", []string{"video"}, false},
 		{"qa", "image", "check an image vs a brief", kindGenerate, "", "", []string{"image_url", "description"}, false},
+		{"qa", "describe", "timecoded description of a video (scenes, speech, sounds, music)", kindGenerate, "", "", []string{"video"}, false},
 	}},
 	{"files", "Files", []actionSpec{
 		{"files", "list", "list your files", kindRead, "", "", nil, true}, // immediate: no args needed
@@ -212,6 +213,7 @@ var actionForms = map[string][]paramSpec{
 	"qa.person":       {req("image1", "first face", pMedia), req("image2", "second face", pMedia)},
 	"qa.image":        {req("image_url", "image to check", pMedia), req("description", "what it should show", pText)},
 	"qa.scene":        {req("video", "video to check", pMedia), req("plan", "scene plan", pJSON)},
+	"qa.describe":     {req("video", "video to describe", pMedia), opt("fps", "frames sampled per second, 1-5 (default 1; cost scales with fps)", pNumber), opt("focus", "optional focus instruction", pText)},
 
 	// Actor-driven generation + manipulation (schemas: worker/src/tools/*.ts).
 	"image.actor_sheet": {req("actor_id", "actor id (act_…)", pText), opt("out_prefix", "output prefix", pText), opt("variations", "variations (1-9)", pNumber)},

@@ -219,7 +219,7 @@ func TestWorkActionsRing(t *testing.T) {
 		"video·create", "video·edit", "video·lipsync", "video·scene",
 		"audio·speak", "audio·sfx", "audio·music", "audio·mix", "audio·concat",
 		"actor·create", "actor·update", "actor·batch",
-		"qa·full", "qa·person", "qa·transcript", "qa·image",
+		"qa·full", "qa·person", "qa·transcript", "qa·image", "qa·describe",
 	}
 	have := map[string]bool{}
 	for _, a := range workActions {
