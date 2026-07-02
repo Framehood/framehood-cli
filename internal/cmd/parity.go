@@ -21,9 +21,15 @@ import (
 // validates required args and renders readable output, never reimplementing the
 // server-side logic.
 
-// --- jobs (get_status: list | cancel) ---
+// --- jobs (get_status: list | status | cancel) ---
 
-// newJobsCmd — the generation-history feed and per-job cancel (MCP `get_status`).
+// Batch-status id cap, mirrored from the worker (get_status accepts at most 50
+// job_ids per call). Validated locally so an oversized batch fails with a clear
+// CLI error before any network call.
+const maxBatchStatusIDs = 50
+
+// newJobsCmd — the generation-history feed, single/batch status checks, and
+// per-job cancel (MCP `get_status`).
 func newJobsCmd(cfg config.Config) *cobra.Command {
 	var kind, status string
 	var limit int
@@ -48,9 +54,11 @@ func newJobsCmd(cfg config.Config) *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "jobs",
-		Short: "Your generation history; cancel a running job",
+		Short: "Your generation history; check or cancel jobs",
 		Example: "  framehood jobs\n" +
 			"  framehood jobs list --kind flux_schnell --status running,succeeded\n" +
+			"  framehood jobs status <job-id>\n" +
+			"  framehood jobs status <job-id> <job-id> <job-id>\n" +
 			"  framehood jobs cancel <job-id>",
 		RunE: list,
 	}
@@ -68,13 +76,63 @@ func newJobsCmd(cfg config.Config) *cobra.Command {
 	listSub.Flags().StringVar(&status, "status", "", "Filter by status, comma-separated (e.g. running,succeeded)")
 	listSub.Flags().IntVarP(&limit, "limit", "n", 0, "Max rows (1–100)")
 
+	statusSub := &cobra.Command{
+		Use:   "status <job-id> [<job-id>…]",
+		Short: "Check job status — one id, or several in a single batch call",
+		Long: "Check job status.\n\n" +
+			"With one id this returns the full job record (the usual single-job poll).\n" +
+			"With several ids it makes ONE batched get_status call (up to 50 ids) and\n" +
+			"prints a summary line plus a row per job — the recommended way to poll a\n" +
+			"set of parallel generations every 30–60s until nothing is queued or\n" +
+			"running, instead of polling each job separately.",
+		Example: "  framehood jobs status job_abc123\n" +
+			"  framehood jobs status job_abc123 job_def456 job_ghi789",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// A single id keeps the existing per-job poll shape ({job_id:…}) and
+			// rendering exactly as before.
+			if len(args) == 1 {
+				return callTool(cmd, cfg, "get_status", map[string]any{"job_id": args[0]})
+			}
+			if len(args) > maxBatchStatusIDs {
+				return fmt.Errorf("at most %d job ids per batch (got %d)", maxBatchStatusIDs, len(args))
+			}
+			return runJobsBatchStatus(cmd, cfg, args)
+		},
+	}
+
 	cmd.AddCommand(
 		listSub,
+		statusSub,
 		&cobra.Command{Use: "cancel <job-id>", Short: "Cancel a non-terminal job (errors if it already finished)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			return callTool(cmd, cfg, "get_status", map[string]any{"action": "cancel", "job_id": args[0]})
 		}},
 	)
 	return cmd
+}
+
+// runJobsBatchStatus polls several jobs in ONE get_status call ({job_ids:[…]})
+// and renders the batch shape — {summary:{total,queued,running,succeeded,
+// failed,not_found}, jobs:[{job_id, status, done, outputs?, credits?, error?}]}
+// — as a summary line plus a row per job. An unrecognized payload falls back to
+// pretty JSON so nothing is hidden.
+func runJobsBatchStatus(cmd *cobra.Command, cfg config.Config, ids []string) error {
+	sess, err := NewSession(cfg)
+	if err != nil {
+		return err
+	}
+	raw, err := sess.Client().CallTool(cmd.Context(), "get_status", map[string]any{"job_ids": ids})
+	if err != nil {
+		return err
+	}
+	// "batch" is a synthetic action key for the formatter lookup — the tool call
+	// itself carries no action; passing job_ids selects the batch shape.
+	if out, ok := render.Readable("get_status", "batch", raw); ok {
+		fmt.Println(out)
+		return nil
+	}
+	fmt.Println(render.PrettyJSON(raw))
+	return nil
 }
 
 // --- billing (extended: transactions, change, preview, cancel, extra-usage) ---
